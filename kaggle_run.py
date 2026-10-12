@@ -5,7 +5,9 @@
 """Step 2 on Kaggle, from the terminal: upload WORK/bundle.zip as a private dataset, run readaloud_align.ipynb on
 Kaggle's GPU T4 x2, and download results.zip into WORK.
 
-usage: uv run kaggle_run.py WORK_DIR [--download]
+usage: uv run kaggle_run.py WORK_DIR [--download | --upload-only]
+  --upload-only: upload the bundle and the notebook, then print the notebook's editor link - Run All there gets a GPU
+              within seconds, while background runs (the default) can wait in Kaggle's queue for half an hour or more
   --download: don't upload or start anything, just wait for the latest run and fetch its results.zip
               (e.g. after the laptop slept and this script was interrupted; the run itself goes on at Kaggle)
 Needs a Kaggle API token in ~/.kaggle/access_token (kaggle.com/settings/api → Generate New Token) and a
@@ -25,6 +27,7 @@ from requests.exceptions import HTTPError
 
 W = os.path.abspath(sys.argv[1])
 DOWNLOAD_ONLY = "--download" in sys.argv[2:]
+UPLOAD_ONLY = "--upload-only" in sys.argv[2:]
 HERE = os.path.dirname(os.path.abspath(__file__))
 bundle = f"{W}/bundle.zip"
 if not os.path.exists(bundle):
@@ -107,6 +110,15 @@ json.dump({"id": kernel, "title": f"{slug}-align", "code_file": "readaloud_align
            "kernel_type": "notebook", "is_private": "true", "enable_gpu": "true", "enable_internet": "true",
            "machine_shape": "NvidiaTeslaT4", "dataset_sources": [dataset], "competition_sources": [],
            "kernel_sources": [], "model_sources": []}, open(f"{kd}/kernel-metadata.json", "w"))
+if UPLOAD_ONLY:
+    # save the notebook without starting a background run, if this version of the Kaggle library can
+    try:
+        api.kernels_push(kd, no_run=True)
+    except TypeError:
+        pass                                    # older library: the notebook is unchanged anyway, nothing to save
+    print(f"uploaded. Open https://www.kaggle.com/code/{kernel}/edit , check Accelerator: GPU T4 x2 and that the "
+          f"input {dataset} is its latest version, Run All, then download results.zip from the Output panel into {W}")
+    sys.exit(0)
 if not DOWNLOAD_ONLY:
     resp = api.kernels_push(kd)
     if getattr(resp, "error", None):

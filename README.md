@@ -40,7 +40,9 @@ so a bad EPUB shows up before anything is uploaded.
    phone-verified Kaggle account, and an API token from kaggle.com/settings/api (*Generate New Token*) saved as
    `~/.kaggle/access_token`. Free accounts get 30 GPU hours a week. The run goes on at Kaggle if the script is
    interrupted (e.g. the laptop sleeps): `uv run kaggle_run.py WORK --download` then just waits for it and fetches
-   `results.zip`, without starting another run.
+   `results.zip`, without starting another run. Background runs can wait in Kaggle's queue for half an hour or more;
+   `uv run kaggle_run.py WORK --upload-only` only uploads and prints the notebook's editor link, where *Run All* gets
+   a GPU within seconds (then download `results.zip` from the *Output* panel).
 
    **Or by hand:** open `readaloud_align.ipynb` on Colab or Kaggle (instructions are in its first cell; on Colab:
    https://colab.research.google.com/github/yuukibarns/readaloud/blob/main/readaloud_align.ipynb), give it
@@ -72,7 +74,9 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
   Finally every chunk is checked both ways: how much of its text was heard inside its audio, and how much of its
   audio is its text. The chunks that agree least are printed, so a text/audio mismatch shows before the GPU run.
 - `align.py` — Qwen3-ForcedAligner on each chunk with its exact sentences, as spoken (`book.spoken_text`: NFKC,
-  digits as kanji numerals, so 「７」 is aligned as 七) (batched on GPU, resumable; with several
+  digits as kanji numerals, so 「７」 is aligned as 七). The aligner doesn't model silence, so it never gets long
+  pauses: every pause VAD found is shortened to 0.2 s before aligning, and word times are mapped back (a start in a
+  shortened pause goes to where speech resumes, an end to where it stopped). (batched on GPU, resumable; with several
   GPUs one worker process each, every track on one GPU). On a GPU it runs
   in float16: on a whole 15 h book it gave the same sentence times as float32 (a few moved by one 80 ms step), 3.5× faster.
   Also writes `units.json`, the aligner's raw word units per chunk, which the notebook packs into `results.zip`.

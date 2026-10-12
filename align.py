@@ -1,6 +1,6 @@
 # /// script
 # requires-python = "==3.12.*"
-# dependencies = ["torch", "qwen-asr==0.0.6", "soundfile"]
+# dependencies = ["torch", "qwen-asr==0.0.6", "soundfile", "numpy"]
 #
 # [tool.uv.sources]
 # torch = { index = "pytorch-cpu" }
@@ -30,6 +30,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import numpy as np
 import soundfile
 import torch
 
@@ -58,8 +59,51 @@ cuda = torch.cuda.is_available()
 batch = args.batch or (8 if cuda else 1)
 
 
-# cached chunk results are only valid for the plan they were made from
-signature = hashlib.sha256(json.dumps(chunks, sort_keys=True).encode()).hexdigest()
+# The aligner doesn't model silence: after a pause a word "starts" where the previous one ended, a short word spoken
+# alone before a long pause collapses onto the words after it, and quiet lines between pauses get squeezed. So it
+# never sees long pauses: every pause VAD found in a chunk is shortened to GAP (speech keeps PAD on both sides, so
+# VAD's tight edges never clip a sound), and word times are mapped back to the recording - a start inside a
+# shortened pause to where speech resumes, an end to where it stopped. (Without vad.json: the audio as it is.)
+GAP, PAD = 0.2, 0.05
+VAD = json.load(open(f"{W}/vad.json")) if os.path.exists(f"{W}/vad.json") else None
+PAUSES_SHORTENED = f"pauses shortened to {GAP}s" if VAD else ""
+
+
+def shorten_pauses(audio, sr, c):
+    """The chunk's speech with pauses shortened, and pieces [(start, end) in the chunk, start in the new audio]."""
+    length, spans = c["end"] - c["start"], []
+    for a, b in VAD.get(c["track"], []):
+        if b > c["start"] and a < c["end"]:
+            a, b = max(0.0, a - c["start"] - PAD), min(length, b - c["start"] + PAD)
+            if spans and a <= spans[-1][1]:                     # padding closed the pause: one span
+                spans[-1] = (spans[-1][0], b)
+            else:
+                spans.append((a, b))
+    if not spans:
+        return audio, None
+    pieces, parts, at = [], [], 0.0
+    for a, b in spans:
+        if parts:
+            parts.append(np.zeros(int(GAP * sr), dtype=np.float32))
+            at += GAP
+        pieces.append((a, b, at))
+        parts.append(audio[int(a * sr):int(b * sr)])
+        at += b - a
+    return np.concatenate(parts), pieces
+
+
+def to_recording(x, pieces, is_start):
+    """A time in the shortened audio -> the same moment in the chunk."""
+    for j, (a, b, at) in enumerate(pieces):
+        if x <= at + (b - a):
+            if x >= at:
+                return a + (x - at)
+            return a if is_start else pieces[j - 1][1]          # inside the shortened pause before piece j
+    return pieces[-1][1]
+
+
+# cached chunk results are only valid for the plan (and method) they were made from
+signature = hashlib.sha256((json.dumps(chunks, sort_keys=True) + PAUSES_SHORTENED).encode()).hexdigest()
 sig_file = f"{A}/plan.sha256"
 if not os.path.exists(sig_file) or open(sig_file).read() != signature:
     for name in os.listdir(A):
@@ -122,7 +166,10 @@ if todo:
             wav = track_wav(cfg, c["track"])
         sr = soundfile.info(wav).samplerate
         audio, _ = soundfile.read(wav, start=int(c["start"] * sr), stop=int(c["end"] * sr), dtype="float32")
-        return (audio, sr), "".join(spoken_text(sentences[i]["text"]) for i in c["sentences"])
+        pieces = None
+        if VAD:
+            audio, pieces = shorten_pauses(audio, sr, c)
+        return (audio, sr), "".join(spoken_text(sentences[i]["text"]) for i in c["sentences"]), pieces
 
     loader, loading = ThreadPoolExecutor(2), {}
     t0, done, finished = time.time(), 0.0, 0
@@ -133,7 +180,7 @@ if todo:
             if n not in loading:
                 loading[n] = loader.submit(load, n)
         ns = queue[:batch]
-        audios, texts = zip(*(loading[n].result() for n in ns))
+        audios, texts, maps = zip(*(loading[n].result() for n in ns))
         audios, texts = list(audios), list(texts)
         try:
             with torch.inference_mode():          # the library doesn't disable autograd itself
@@ -145,9 +192,13 @@ if todo:
             torch.cuda.empty_cache()
             print(f"out of GPU memory - retrying with batch {batch}", flush=True)
             continue
-        for n, units in zip(ns, results):
+        for n, units, pieces in zip(ns, results, maps):
             tmp = f"{A}/{n:04}.json.tmp"                  # written whole, then renamed: a resume never sees half a file
-            raw = [[u.text, round(u.start_time, 3), round(u.end_time, 3)] for u in units]
+            if pieces:
+                raw = [[u.text, round(to_recording(u.start_time, pieces, True), 3),
+                        round(to_recording(u.end_time, pieces, False), 3)] for u in units]
+            else:
+                raw = [[u.text, round(u.start_time, 3), round(u.end_time, 3)] for u in units]
             json.dump({"track": chunks[n]["track"], "sentences": sentence_times(chunks[n], raw, sentences),
                        "units": raw}, open(tmp, "w"), ensure_ascii=False)
             os.replace(tmp, f"{A}/{n:04}.json")
