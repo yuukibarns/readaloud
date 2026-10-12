@@ -68,7 +68,7 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
 - `prepare.py` — tracks from chapter marks (16 kHz mono Opus), Deepgram nova-3 word timings, then `vad.py` and `plan.py`, then the bundle.
 - `vad.py` — Silero VAD speech segments per track, edges to the millisecond (Silero's default rounds them to
   0.1 s). Its per-frame probabilities are kept in `WORK/vad/`, so changing the settings never runs the model again;
-  at most 4 processes, each reading its track in blocks.
+  one process per core as free memory allows (~300 MB each, half the free memory at most, two cores left free).
 - `plan.py` — locates every sentence in Deepgram's transcript by *reading*: both sides go through a Japanese
   morphological analyser (`reading.py`: fugashi + UniDic, digits as kanji numerals), so 「１２」/十二 and 鼠/ねずみ
   compare equal. Unique 10-character readings chained in order are anchors; between anchors an edit-distance

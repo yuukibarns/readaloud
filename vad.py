@@ -12,7 +12,7 @@
 # ///
 """Step 1b (local, called by prepare.py): speech segments in every track with Silero VAD; chunks get cut in the pauses.
 
-usage: python vad.py WORK_DIR      (CPU work in WORKERS processes, each reading its track in blocks: a few hundred MB)
+usage: python vad.py WORK_DIR      (CPU work, one process per core as free memory allows; ~300 MB each)
 Silero's speech probability for every 32 ms frame is kept in WORK/vad/<track>.npy; vad.json (the segments) is made
 from those with SETTINGS, so changing the settings never runs the model again.
 """
@@ -26,7 +26,22 @@ from book import load_config, track_wav  # noqa: E402
 
 cfg = load_config(os.path.abspath(sys.argv[1]))
 PROBS = os.path.join(cfg["work"], "vad")
-WORKERS = min(4, os.cpu_count())                       # leaves the computer usable meanwhile
+
+
+def available_memory():
+    """Bytes of memory free for new work (Linux /proc/meminfo; elsewhere assume 4 GB)."""
+    try:
+        for line in open("/proc/meminfo"):
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return 4 << 30
+
+
+# a worker needs ~300 MB (275 MB measured on a 106 min track): use at most half the free memory at 500 MB each,
+# and leave two cores for the rest of the computer
+WORKERS = max(1, min(os.cpu_count() - 2, available_memory() // 2 // (500 << 20)))
 # edges to the millisecond (silero rounds to 0.1 s by default, which clips word edges and drops short segments)
 SETTINGS = dict(min_silence_duration_ms=120, speech_pad_ms=0, time_resolution=3)
 
