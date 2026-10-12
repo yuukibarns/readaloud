@@ -38,7 +38,9 @@ so a bad EPUB shows up before anything is uploaded.
 3. **Kaggle from the terminal (fastest, two GPUs):** `uv run kaggle_run.py WORK` uploads `bundle.zip` as a private
    Kaggle dataset, runs the notebook on *GPU T4 x2* and puts `results.zip` into `WORK`. One-time setup: a
    phone-verified Kaggle account, and an API token from kaggle.com/settings/api (*Generate New Token*) saved as
-   `~/.kaggle/access_token`. Free accounts get 30 GPU hours a week.
+   `~/.kaggle/access_token`. Free accounts get 30 GPU hours a week. The run goes on at Kaggle if the script is
+   interrupted (e.g. the laptop sleeps): `uv run kaggle_run.py WORK --download` then just waits for it and fetches
+   `results.zip`, without starting another run.
 
    **Or by hand:** open `readaloud_align.ipynb` on Colab or Kaggle (instructions are in its first cell; on Colab:
    https://colab.research.google.com/github/yuukibarns/readaloud/blob/main/readaloud_align.ipynb), give it

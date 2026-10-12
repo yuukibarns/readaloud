@@ -5,7 +5,9 @@
 """Step 2 on Kaggle, from the terminal: upload WORK/bundle.zip as a private dataset, run readaloud_align.ipynb on
 Kaggle's GPU T4 x2, and download results.zip into WORK.
 
-usage: uv run kaggle_run.py WORK_DIR
+usage: uv run kaggle_run.py WORK_DIR [--download]
+  --download: don't upload or start anything, just wait for the latest run and fetch its results.zip
+              (e.g. after the laptop slept and this script was interrupted; the run itself goes on at Kaggle)
 Needs a Kaggle API token in ~/.kaggle/access_token (kaggle.com/settings/api → Generate New Token) and a
 phone-verified Kaggle account (GPU and internet access). Dataset and notebook are private, named after WORK_DIR.
 Re-running after a failure skips the upload if bundle.zip hasn't changed.
@@ -22,6 +24,7 @@ from kaggle.api.kaggle_api_extended import KaggleApi
 from requests.exceptions import HTTPError
 
 W = os.path.abspath(sys.argv[1])
+DOWNLOAD_ONLY = "--download" in sys.argv[2:]
 HERE = os.path.dirname(os.path.abspath(__file__))
 bundle = f"{W}/bundle.zip"
 if not os.path.exists(bundle):
@@ -42,6 +45,8 @@ def sha256(path):
     return h.hexdigest()
 
 
+if DOWNLOAD_ONLY:
+    print(f"waiting for the latest run of https://www.kaggle.com/code/{kernel} ...", flush=True)
 # --- 1. the bundle as a private dataset (skipped when this exact bundle is already up) ---------------------------
 up = f"{W}/.kaggle-dataset"
 os.makedirs(up, exist_ok=True)
@@ -55,7 +60,9 @@ def status_of(ref):
 
 
 exists = status_of(dataset) is not None
-if exists and os.path.exists(sent) and open(sent).read() == digest:
+if DOWNLOAD_ONLY:
+    pass                                            # nothing to upload: only fetch the latest run's results
+elif exists and os.path.exists(sent) and open(sent).read() == digest:
     print(f"dataset {dataset}: this bundle is already uploaded")
 else:
     staged = f"{up}/bundle.zip"
@@ -80,17 +87,17 @@ else:
     print(f"dataset: {getattr(resp, 'url', '') or 'https://www.kaggle.com/datasets/' + dataset}", flush=True)
     open(sent, "w").write(digest)
 status, t_wait = None, time.time()
-while time.time() - t_wait < 1800:                  # Kaggle processes the upload before a notebook can use it
+while not DOWNLOAD_ONLY:                            # Kaggle processes the upload before a notebook can use it
     now = status_of(dataset)
     if now != status:
         print(f"  dataset {now or 'not visible yet'}", flush=True)
         status = now
     if status and "ready" in status:
         break
+    if time.time() - t_wait > 1800:
+        sys.exit(f"dataset {dataset} is still '{status or 'not visible'}' after 30 min - check "
+                 f"https://www.kaggle.com/datasets/{dataset} and run this again")
     time.sleep(15)
-else:
-    sys.exit(f"dataset {dataset} is still '{status or 'not visible'}' after 30 min - check "
-             f"https://www.kaggle.com/datasets/{dataset} and run this again")
 
 # --- 2. run the notebook on GPU T4 x2 ------------------------------------------------------------------------------
 kd = f"{W}/.kaggle-kernel"
@@ -100,15 +107,22 @@ json.dump({"id": kernel, "title": f"{slug}-align", "code_file": "readaloud_align
            "kernel_type": "notebook", "is_private": "true", "enable_gpu": "true", "enable_internet": "true",
            "machine_shape": "NvidiaTeslaT4", "dataset_sources": [dataset], "competition_sources": [],
            "kernel_sources": [], "model_sources": []}, open(f"{kd}/kernel-metadata.json", "w"))
-resp = api.kernels_push(kd)
-if getattr(resp, "error", None):
-    sys.exit(f"Kaggle refused the notebook: {resp.error}")
-print(f"running on Kaggle: {getattr(resp, 'url', '') or 'https://www.kaggle.com/code/' + kernel}", flush=True)
+if not DOWNLOAD_ONLY:
+    resp = api.kernels_push(kd)
+    if getattr(resp, "error", None):
+        sys.exit(f"Kaggle refused the notebook: {resp.error}")
+    print(f"running on Kaggle: {getattr(resp, 'url', '') or 'https://www.kaggle.com/code/' + kernel}", flush=True)
 
 t0, last = time.time(), None
 while True:
-    time.sleep(30)
-    r = api.kernels_status(kernel)
+    if last is not None or not DOWNLOAD_ONLY:
+        time.sleep(30)
+    try:
+        r = api.kernels_status(kernel)
+    except Exception as e:                      # a network hiccup (e.g. after sleep): keep waiting
+        print(f"  (status check failed: {e}; retrying)", flush=True)
+        last = last or "unknown"
+        continue
     status = str(r.status).lower()
     if status != last:
         print(f"  {time.time() - t0:5.0f}s  {status}", flush=True)
