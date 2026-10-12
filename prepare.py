@@ -111,7 +111,6 @@ with zipfile.ZipFile(f"{W}/bundle.zip", "w") as z:
     z.write(cfg["epub_path"], "book.epub")
     z.writestr("tracks.json", json.dumps([{k: v for k, v in t.items() if k != "src"} for t in tracks], ensure_ascii=False))
     z.write(f"{W}/plan.json", "plan.json")
-    z.write(f"{W}/vad.json", "vad.json")                  # align.py shortens pauses before aligning
     for t in tracks:
         z.write(f"{W}/tracks/{t['id']}.ogg", f"tracks/{t['id']}.ogg")
     for script in ("book.py", "align.py"):

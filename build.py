@@ -78,15 +78,17 @@ for k in range(1, len(times)):          # drop timings that go backwards
         times[k] = None
 # Where one sentence ends and the next begins. The aligner doesn't model silence (after a pause a word often "starts"
 # where the previous one ended), but it is sure the previous sentence is still being spoken when its last word starts,
-# and the next one has begun when its second word starts. The pause between them, if any, is the first silence VAD
-# found after the former that begins before the latter: the previous sentence ends where it begins, the next starts
-# where speech resumes. A track's first sentence starting inside a silence starts where that silence ends.
-vad = json.load(open(f"{W}/vad.json"))
+# and the next one has begun when its second word starts. The pause between them, if any, is the first pause (in
+# plan.py's speech map: VAD and Deepgram) after the former that begins before the latter: the previous sentence ends
+# where it begins, the next starts where speech resumes. A track's first sentence starting inside a silence starts where that silence ends.
+plan_speech = json.load(open(f"{W}/plan.json")).get("speech")
+if plan_speech is None:
+    sys.exit("plan.json is from an older prepare.py (no speech map) - run prepare.py again, then align again")
 # speech that belongs to no text (plan.py's extra_speech) isn't the narration of any sentence: not speech here
 extra = {(c["track"], tuple(x)) for c in plan_chunks for x in c.get("extra_speech", [])}
-vad = {tr: [g for g in segs if (tr, (round(g[0], 3), round(g[1], 3))) not in extra] for tr, segs in vad.items()}
-SILENCE = {tr: [(segs[i][1], segs[i + 1][0]) for i in range(len(segs) - 1)] for tr, segs in vad.items()}
-SPEECH_FROM = {tr: segs[0][0] for tr, segs in vad.items() if segs}
+speech = {tr: [g for g in segs if (tr, (round(g[0], 3), round(g[1], 3))) not in extra] for tr, segs in plan_speech.items()}
+SILENCE = {tr: [(segs[i][1], segs[i + 1][0]) for i in range(len(segs) - 1)] for tr, segs in speech.items()}
+SPEECH_FROM = {tr: segs[0][0] for tr, segs in speech.items() if segs}
 moved, prev = 0, None
 for t in times:
     if not t:
@@ -96,21 +98,21 @@ for t in times:
         i = bisect.bisect_left([a for a, _ in gaps], prev["last_start"])
         if i < len(gaps) and gaps[i][0] <= t["second_start"] and gaps[i][1] < t["end"]:
             prev["end"] = min(prev["end"], gaps[i][0])
-            moved += t["start"] != gaps[i][1]
+            moved += abs(t["start"] - gaps[i][1]) > 0.1     # (align.py's padding alone moves starts by 0.05 s)
             t["start"] = gaps[i][1]
     else:
         inside = [g for g in [(0.0, SPEECH_FROM.get(t["track"], 0.0))] + gaps if g[0] <= t["start"] < g[1]]
         if inside and inside[0][1] < t["end"]:
-            moved += 1
+            moved += abs(t["start"] - inside[0][1]) > 0.1
             t["start"] = inside[0][1]
     prev = t
-print(f"sentence boundaries placed in the pause between sentences: {moved} starts moved")
+print(f"sentence boundaries placed in the pause between sentences: {moved} starts moved by more than 0.1 s")
 # The aligner collapses a short word spoken alone before a pause onto the words after it (a section number: 七 ...
 # 限定された; 「部活、…」). Then the speech segment holding that word belongs to no sentence. If Deepgram heard this
 # sentence's first sound (the middle of its first character) inside such an unclaimed speech segment before the
 # aligner's start, the sentence starts there.
 heard_from = {r["id"]: r for r in json.load(open(f"{W}/plan.json"))["sentences"] if r.get("heard_from_start")}
-SPEECH = {tr: segs for tr, segs in vad.items()}
+SPEECH = {tr: segs for tr, segs in speech.items()}
 reclaimed, prev = 0, None
 for s, t in zip(sentences, times):
     if not t:
@@ -372,11 +374,11 @@ pace = pct(rates, 0.5)
 fast = [s for s, t, _ in timed if len(s["norm"]) >= 6 and len(s["norm"]) / max(1e-6, t["end"] - t["start"]) > 3 * pace]
 say(f"  reading pace (median): {pace:.1f} chars/s; sentences timed faster than 3x that: {len(fast)}"
     + (f" {[s['text'].strip()[:20] for s in fast[:5]]}" if fast else ""))
-onsets = {tr: [a for a, _ in segs] for tr, segs in vad.items()}
+onsets = {tr: [a for a, _ in segs] for tr, segs in speech.items()}
 
 
 def silence_before(tr, a):                     # from a clip's start to the first speech after it
-    segs, ons = vad.get(tr, []), onsets.get(tr, [])
+    segs, ons = speech.get(tr, []), onsets.get(tr, [])
     i = bisect.bisect_right(ons, a) - 1
     if i >= 0 and a < segs[i][1]:
         return 0.0
@@ -390,7 +392,7 @@ spans = {}
 for _, _, c in timed:
     spans.setdefault(c["track"], []).append((c["begin"], c["end"]))
 speech_total, outside = 0.0, {}
-for tr, segs in vad.items():
+for tr, segs in speech.items():
     cs = sorted(spans.get(tr, []))
     for a, b in segs:
         speech_total += b - a
@@ -411,6 +413,6 @@ say(f"  sentence start vs where Deepgram heard its first sound (sentences heard 
     f" more than 1 s apart: {len(off)} (Deepgram is wrong in some of these; the largest are worth a listen)")
 for gap, s, t, r in off[:8]:
     say(f"      {t['track']} {t['start']:8.1f} s (Deepgram {r['first_heard']:8.1f} s)  {s['text'].strip()[:30]}")
-say(f"  boundary rules: {moved} starts placed in the pause before them, {reclaimed} given back their first word")
+say(f"  boundary rules: {moved} starts moved over 0.1 s into the pause before them, {reclaimed} given back their first word")
 print("\n".join(lines))
 open(f"{W}/report.txt", "w").write("\n".join(lines) + "\n")

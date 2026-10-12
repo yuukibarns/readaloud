@@ -66,7 +66,9 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
 - `book.py` — reads the EPUB's spine, splits `<p>` paragraphs into sentences (at 。！？, keeping 「…」と言った together;
   never inside markup; furigana `<rt>` is shown but not treated as spoken text).
 - `prepare.py` — tracks from chapter marks (16 kHz mono Opus), Deepgram nova-3 word timings, then `vad.py` and `plan.py`, then the bundle.
-- `vad.py` — Silero VAD speech segments per track; the pauses are the only places audio gets cut.
+- `vad.py` — Silero VAD speech segments per track, edges to the millisecond (Silero's default rounds them to
+  0.1 s). Its per-frame probabilities are kept in `WORK/vad/`, so changing the settings never runs the model again;
+  at most 4 processes, each reading its track in blocks.
 - `plan.py` — locates every sentence in Deepgram's transcript by *reading*: both sides go through a Japanese
   morphological analyser (`reading.py`: fugashi + UniDic, digits as kanji numerals), so 「１２」/十二 and 鼠/ねずみ
   compare equal. Unique 10-character readings chained in order are anchors; between anchors an edit-distance
@@ -75,14 +77,18 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
   Storyteller's aligner) covers at least half of its reading; short lines Deepgram missed between heard neighbours
   are kept if the time there could hold them at twice the narrator's measured pace. Tracks are cut into ≤160 s
   chunks, only before heard sentences, in the first silence after the previous sentence's last heard word.
+  The pauses are defined once, here, for the whole pipeline: VAD's pauses minus any stretch where Deepgram heard a
+  word starting inside them (VAD misses short and soft speech: a lone 「へ？」, a whispered line). `plan.json`
+  carries the resulting speech map; chunks are cut, pauses shortened (`align.py`) and sentence boundaries placed
+  (`build.py`) only in these pauses.
   Finally every chunk is checked both ways: how much of its text was heard inside its audio, and how much of its
   audio is its text. The chunks that agree least are printed, so a text/audio mismatch shows before the GPU run.
   Speech in a chunk that belongs to no text (a picture read aloud, e.g. a newspaper advert or a title set as an
-  image; an announcement) is recorded as `extra_speech`: VAD speech whose every transcribed character the alignment
+  image; an announcement) is recorded as `extra_speech`: speech whose every transcribed character the alignment
   found no book text for, with no sentence located over it. `align.py` leaves it out of the aligner's audio.
 - `align.py` — Qwen3-ForcedAligner on each chunk with its exact sentences, as spoken (`book.spoken_text`: NFKC,
   digits as kanji numerals, so 「７」 is aligned as 七). The aligner doesn't model silence, so it never gets long
-  pauses: every pause VAD found is shortened to 0.2 s before aligning, and word times are mapped back (a start in a
+  pauses: every pause in `plan.json`'s speech map is shortened to 0.2 s before aligning, and word times are mapped back (a start in a
   shortened pause goes to where speech resumes, an end to where it stopped). (batched on GPU, resumable; with several
   GPUs one worker process each, every track on one GPU). On a GPU it runs
   in float16: on a whole 15 h book it gave the same sentence times as float32 (a few moved by one 80 ms step), 3.5× faster.
@@ -99,10 +105,10 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
   different `align.py` (results carry its fingerprint); sentence `<span>`s, one SMIL per document, 64 kbps mono AAC per track, EPUB 3 OPF and nav.
   Sentence boundaries combine both sources: the aligner doesn't model silence (after a pause a word often "starts"
   where the previous one ended), but it is sure a sentence is still being spoken when its last word starts and the
-  next has begun when its second word starts; the first VAD silence in between is the boundary (one sentence ends
+  next has begun when its second word starts; the first pause in between is the boundary (one sentence ends
   where it begins, the next starts where speech resumes). The aligner also collapses a short word spoken alone
   before a pause (a section number 「七」, 「部活、…」) onto the words after it; if Deepgram heard a sentence's first
-  sound inside a VAD speech segment that no sentence covers, the sentence starts there. Each clip starts 0.15 s
+  sound inside a speech segment that no sentence covers, the sentence starts there. Each clip starts 0.15 s
   before its start. Where the aligner squeezes quick short lines (でも！, 「うん。) into an
   instant, the span is shared with the next sentence by text length; an end that overruns the next start is cut to it.
 

@@ -231,27 +231,43 @@ print(f"sentences located: {len(sentences) - len(missing)}/{len(sentences)} "
       f"({sum(1 for x in rough if x and x.get('unheard'))} of them between heard neighbours); not in audio: {len(missing)}")
 
 # --- chunking --------------------------------------------------------------------------------------------
-GAPS = {t["id"]: [(s[i][1], s[i + 1][0]) for s in [vad[t["id"]]] for i in range(len(s) - 1)] for t in tracks}
+DUR = {t["id"]: t["end"] - t["start"] for t in tracks}
+MIN_PAUSE = 0.12           # vad.py's min_silence_duration_ms: anything shorter is not a pause
 
 
-def silences(track):
-    """VAD pauses, minus the speech inside them that VAD missed (quiet lines): words Deepgram heard *starting*
-    inside the pause. (Deepgram's word spans run back to back, so a word that follows a pause covers part of it.)"""
-    out, words = [], WORDS[track]
+def pauses(track):
+    """Where nobody hears speech: VAD's pauses (including before the first and after the last speech), minus any
+    stretch where Deepgram heard a word starting inside the pause - VAD misses short and quiet speech (a lone 「へ？」,
+    a soft-voiced line). Deepgram's word starts are reliable, its word ends overshoot into the pause, so a pause
+    keeps only its parts before the first such word and after the last one ends; a word starting in the last 0.1 s is
+    the speech VAD found resuming. This is the one definition of a pause the pipeline uses: chunks are cut in these,
+    align.py shortens only these (it must never delete speech), build.py places sentence boundaries in these."""
+    segs, words = vad[track], WORDS[track]
+    gaps = [(0.0, segs[0][0])] + [(segs[i][1], segs[i + 1][0]) for i in range(len(segs) - 1)] + [(segs[-1][1], DUR[track])] \
+        if segs else [(0.0, DUR[track])]
     starts = [w[0] for w in words]
-    for a, b in GAPS[track]:
-        inside = words[bisect.bisect_right(starts, a + 0.15):bisect.bisect_left(starts, b - 0.15)]
-        if not inside:
-            out.append((a, b))
-            continue
-        for x, y in [(a, inside[0][0]), (min(inside[-1][1], b), b)]:
-            if y - x >= 0.2:
-                out.append((x, y))
+    out = []
+    for a, b in gaps:
+        inside = words[bisect.bisect_right(starts, a):bisect.bisect_left(starts, b - 0.1)]
+        pieces = [(a, inside[0][0]), (min(inside[-1][1], b), b)] if inside else [(a, b)]
+        out += [(x, y) for x, y in pieces if y - x >= MIN_PAUSE]
     return out
 
 
-QUIET = {t["id"]: silences(t["id"]) for t in tracks}
-DUR = {t["id"]: t["end"] - t["start"] for t in tracks}
+PAUSES = {t["id"]: pauses(t["id"]) for t in tracks}
+
+
+def between(track):
+    """Speech: everything between the pauses (plan.json carries it for align.py and build.py)."""
+    out, at = [], 0.0
+    for a, b in PAUSES[track] + [(DUR[track], DUR[track])]:
+        if a > at:
+            out.append((round(at, 3), round(a, 3)))
+        at = max(at, b)
+    return out
+
+
+SPEECH = {t["id"]: between(t["id"]) for t in tracks}
 
 
 def cut_before(track, t, prev_heard=None):
@@ -259,9 +275,9 @@ def cut_before(track, t, prev_heard=None):
     Given when the previous sentence's last matched character starts: the first silence after it, if that comes
     before t. (Deepgram's word starts are reliable, its word ends overshoot into pauses; the next sentence's start
     can be off by its unmatched opening words; and the longest pause nearby can be a comma inside a sentence.)"""
-    g = GAPS[track]
+    g = PAUSES[track]
     if prev_heard is not None:
-        q = QUIET[track]
+        q = g
         i = bisect.bisect_right([b for _, b in q], prev_heard + 0.1)
         if i < len(q) and q[i][0] < t + 0.5:
             a, b = q[i]
@@ -277,7 +293,7 @@ def cut_before(track, t, prev_heard=None):
 
 def cut_after(track, t):
     """A cut point inside the first pause after speech that ends near t."""
-    for a, b in GAPS[track]:
+    for a, b in PAUSES[track]:
         if b > t - 0.3 and a >= t - 1.0:
             return (a + b) / 2 if b - a < 2 else a + 0.5
     return DUR[track]
@@ -311,7 +327,7 @@ for track, ks in by_track.items():
                 first, g_start = ks[i + 1], end
 
 # --- speech in a chunk that belongs to no text: a picture read aloud (a newspaper advert, a title set as an image),
-# an announcement. A VAD speech segment counts if every character Deepgram heard in it is one the alignment found no
+# an announcement. A speech segment counts if every character Deepgram heard in it is one the alignment found no
 # book text for (an insertion, not a misheard word) and no sentence is located over it. align.py removes it from the
 # aligner's audio together with the pauses: the aligner should only hear speech that belongs to its text.
 aligned_h = {h for h in r2h if h >= 0}
@@ -322,7 +338,7 @@ idx = {s["id"]: k for k, s in enumerate(sentences)}
 for c in chunks:
     located = [(rough[idx[i]]["start"], rough[idx[i]]["end"]) for i in c["sentences"] if rough[idx[i]]]
     extra = []
-    for a0, b0 in vad[c["track"]]:
+    for a0, b0 in SPEECH[c["track"]]:
         if b0 <= c["start"] or a0 >= c["end"]:
             continue
         hs = [h for t, h in heard_at_t.get(c["track"], []) if a0 <= t <= b0]
@@ -361,7 +377,7 @@ lens = [c["end"] - c["start"] for c in chunks]
 print(f"{len(chunks)} chunks, length {min(lens):.0f}-{max(lens):.0f}s, mean {sum(lens) / len(lens):.0f}s; "
       f"over 178 s: {sum(x > 178 for x in lens)}")
 json.dump({"sentences": [{"id": s["id"], **(x or {})} for s, x in zip(sentences, rough)], "chunks": chunks,
-           "missing": missing}, open(f"{W}/plan.json", "w"), ensure_ascii=False)
+           "missing": missing, "speech": SPEECH}, open(f"{W}/plan.json", "w"), ensure_ascii=False)
 index = {s["id"]: s for s in sentences}
 for t in tracks:
     cs = [c for c in chunks if c["track"] == t["id"]]
