@@ -1,21 +1,26 @@
 # /// script
 # requires-python = "==3.12.*"
-# dependencies = ["kaggle>=2.2"]
+# dependencies = ["kaggle @ git+https://github.com/Kaggle/kaggle-cli@9c57dd74c29904c40ff7879eed33644be89d2e2f"]
 # ///
-"""Step 2 on Kaggle: upload WORK/bundle.zip and set up the alignment notebook with it; you press Run All.
+"""Step 2 on Kaggle: upload WORK/bundle.zip and set up an alignment notebook for it; you press Run All.
 
-usage: uv run kaggle_run.py WORK_DIR
+usage: uv run kaggle_run.py WORK_DIR [--clean]
 Then open the printed link, check Accelerator: GPU T4 x2, Run All (an interactive session gets a GPU within seconds;
-background runs started from here could wait in Kaggle's queue for an hour), and download results.zip from the
-Output panel into WORK_DIR.
+background runs could wait in Kaggle's queue for an hour), and download results.zip from the Output panel into
+WORK_DIR.
+  --clean: also delete this book's datasets and notebooks for other bundles
 
 Needs a Kaggle API token in ~/.kaggle/access_token (kaggle.com/settings/api → Generate New Token) and a
 phone-verified Kaggle account (GPU and internet access).
 
-The bundle goes up as one file, bundle.bin (Kaggle would unpack a .zip into many files, which then take long to
-attach to a session), in its own private dataset named after the book and the bundle's fingerprint
-(readaloud-<book>-<sha8>). The notebook (readaloud-<book>-align) is saved without running, with that dataset as
-input and the fingerprint written into it, so it refuses any other bundle. The book's other datasets are deleted.
+Each bundle gets its own private dataset and its own notebook, both named after the book and the bundle's
+fingerprint (readaloud-<book>-<sha8>, readaloud-<book>-<sha8>-align). The bundle goes up as one file, bundle.bin
+(Kaggle unpacks a .zip into many files, which then take long to attach). The notebook is saved without running
+(Kaggle's Quick Save), with that dataset as input and the fingerprint written in. Being new, it has no editor draft
+that could hold older code or another input. Re-running with the same bundle reuses both.
+
+(The Kaggle library is pinned to the commit that added --no-run, not yet in a release; Kaggle calls are retried
+by the library when the connection drops.)
 """
 import hashlib
 import json
@@ -26,11 +31,10 @@ import sys
 import time
 
 from kaggle.api.kaggle_api_extended import KaggleApi
-from kagglesdk.kernels.services.kernels_api_service import KernelsApiClient
-from kagglesdk.kernels.types.kernels_enums import KernelExecutionType
 from requests.exceptions import HTTPError
 
 W = os.path.abspath(sys.argv[1])
+CLEAN = "--clean" in sys.argv[2:]
 HERE = os.path.dirname(os.path.abspath(__file__))
 bundle = f"{W}/bundle.zip"
 if not os.path.exists(bundle):
@@ -38,9 +42,9 @@ if not os.path.exists(bundle):
 
 api = KaggleApi()
 api.authenticate()
+call = api.with_retry                                   # retries when the connection drops
 user = api.get_config_value("username")
 book = "readaloud-" + re.sub(r"[^a-z0-9]+", "-", os.path.basename(W).lower()).strip("-")
-kernel = f"{user}/{book}-align"
 
 
 def sha256(path):
@@ -54,25 +58,19 @@ def sha256(path):
 def status_of(ref):
     """A dataset's processing status, or None while Kaggle doesn't (yet) know it (it answers 403/404 then)."""
     try:
-        return str(api.dataset_status(ref)).lower()
+        return str(call(api.dataset_status)(ref)).lower()
     except HTTPError:
         return None
 
 
 fingerprint = sha256(bundle)[:8]
 slug = f"{book}-{fingerprint}"
-dataset = f"{user}/{slug}"
+dataset, kernel = f"{user}/{slug}", f"{user}/{slug}-align"
 
 # --- 1. this bundle as its own dataset, one file ----------------------------------------------------------------
 if status_of(dataset) is not None:
-    files = [f.name for f in api.dataset_list_files(dataset).files]
-    if files == ["bundle.bin"]:
-        print(f"dataset {dataset}: this bundle is already uploaded")
-    else:                                               # an older upload Kaggle unpacked: replace it
-        api.dataset_delete(user, slug, no_confirm=True)
-        print(f"deleted {dataset} (it held the unpacked bundle)")
-        time.sleep(10)
-if status_of(dataset) is None:
+    print(f"dataset {dataset}: this bundle is already uploaded")
+else:
     up = f"{W}/.kaggle-dataset"
     shutil.rmtree(up, ignore_errors=True)
     os.makedirs(up)
@@ -100,45 +98,41 @@ while True:                                             # Kaggle processes the u
                  f"https://www.kaggle.com/datasets/{dataset} and run this again")
     time.sleep(10)
 
-# --- 2. the notebook, saved without running: this dataset as input, its fingerprint written in ------------------
+# --- 2. this bundle's notebook, saved without running ----------------------------------------------------------
 kd = f"{W}/.kaggle-kernel"
-os.makedirs(kd, exist_ok=True)
+shutil.rmtree(kd, ignore_errors=True)
+os.makedirs(kd)
 nb = json.load(open(f"{HERE}/readaloud_align.ipynb"))
 for cell in nb["cells"]:
     src = "".join(cell["source"])
     if 'EXPECTED_BUNDLE = ""' in src:
         cell["source"] = src.replace('EXPECTED_BUNDLE = ""', f'EXPECTED_BUNDLE = "{fingerprint}"').splitlines(True)
 json.dump(nb, open(f"{kd}/readaloud_align.ipynb", "w"), ensure_ascii=False, indent=1)
-json.dump({"id": kernel, "title": f"{book}-align", "code_file": "readaloud_align.ipynb", "language": "python",
+json.dump({"id": kernel, "title": f"{slug}-align", "code_file": "readaloud_align.ipynb", "language": "python",
            "kernel_type": "notebook", "is_private": "true", "enable_gpu": "true", "enable_internet": "true",
            "machine_shape": "NvidiaTeslaT4", "dataset_sources": [dataset], "competition_sources": [],
            "kernel_sources": [], "model_sources": []}, open(f"{kd}/kernel-metadata.json", "w"))
-save = KernelsApiClient.save_kernel                     # this library version can't ask for a save without a run:
-
-
-def quick_save(self, request=None):                     # set it on the request (Kaggle's "Quick Save")
-    request.kernel_execution_type = KernelExecutionType.QUICK_SAVE
-    return save(self, request)
-
-
-KernelsApiClient.save_kernel = quick_save
-resp = api.kernels_push(kd)
+resp = call(api.kernels_push)(kd, no_run=True)
 if getattr(resp, "error", None):
     sys.exit(f"Kaggle refused the notebook: {resp.error}")
 
-# --- 3. the book's datasets for other bundles are no longer used ------------------------------------------------
-for d in api.dataset_list(mine=True, search=book):
-    name = d.ref.split("/")[-1]
-    if name != slug and (name == book or re.fullmatch(re.escape(book) + r"-[0-9a-f]{8}", name)):
-        try:
-            api.dataset_delete(user, name, no_confirm=True)
-            print(f"  deleted the old dataset {user}/{name}")
-        except Exception as e:
-            print(f"  (couldn't delete {user}/{name}: {e})")
+# --- 3. on request: this book's datasets and notebooks for other bundles ----------------------------------------
+if CLEAN:
+    own = re.compile(re.escape(book) + r"(-[0-9a-f]{8})?")
+    for d in call(api.dataset_list)(mine=True, search=book):
+        name = d.ref.split("/")[-1]
+        if name != slug and own.fullmatch(name):
+            call(api.dataset_delete)(user, name, no_confirm=True)
+            print(f"  deleted the dataset {user}/{name}")
+    for k in call(api.kernels_list)(mine=True, search=book):
+        name = k.ref.split("/")[-1]
+        if name != f"{slug}-align" and name.endswith("-align") and own.fullmatch(name[:-len("-align")]):
+            call(api.kernels_delete)(k.ref, no_confirm=True)
+            print(f"  deleted the notebook {k.ref}")
 
 print(f"""
 ready. Open https://www.kaggle.com/code/{kernel}/edit
-  - Accelerator: GPU T4 x2 (Settings), input: {slug}
+  - Settings: Accelerator GPU T4 x2 (the input {slug} is attached)
   - Run All
   - when it's done, download results.zip from the Output panel into {W}
 then: uv run build.py {W}""")
