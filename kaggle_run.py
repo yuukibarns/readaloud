@@ -84,7 +84,7 @@ else:
         if resp.error and "already in use" in resp.error:   # created by an earlier attempt: add a version instead
             exists = True
     if exists:
-        resp = api.dataset_create_version(up, "new bundle", convert_to_csv=False, delete_old_versions=True)
+        resp = api.dataset_create_version(up, "new bundle", convert_to_csv=False)    # old versions stay: a notebook is pinned to one
     if resp.error:
         sys.exit(f"Kaggle refused the dataset: {resp.error}")
     print(f"dataset: {getattr(resp, 'url', '') or 'https://www.kaggle.com/datasets/' + dataset}", flush=True)
