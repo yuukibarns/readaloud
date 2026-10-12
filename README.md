@@ -35,16 +35,20 @@ so a bad EPUB shows up before anything is uploaded.
 2. `uv run prepare.py WORK` — needs ffmpeg and a Deepgram key (`$DEEPGRAM_API_KEY`, or the file
    `~/.config/readaloud/deepgram_key`). Writes `WORK/bundle.zip`. Every step is cached, so re-running is cheap.
 
-3. **Kaggle (two GPUs):** `uv run kaggle_run.py WORK` uploads `bundle.zip` and sets up a notebook for it, without
-   running anything. Each bundle gets its own private dataset (one file, `bundle.bin`) and its own notebook, both
-   named after its fingerprint (`readaloud-<book>-<sha8>`, `…-align`); a new notebook has no editor draft that could
-   hold older code or another input. Open the printed link, check *Accelerator: GPU T4 x2*, press *Run All* (an
-   interactive session gets a GPU within seconds; background runs can wait in Kaggle's queue for an hour), and
-   download `results.zip` from the *Output* panel. `--clean` also deletes the book's datasets and notebooks for
-   other bundles. One-time setup: a phone-verified Kaggle account, and an API token from kaggle.com/settings/api
-   (*Generate New Token*) saved as `~/.kaggle/access_token`. Free accounts get 30 GPU hours a week.
+3. **Kaggle (two GPUs):** `uv run kaggle_run.py WORK` uploads `bundle.zip` once, as its own private dataset (one
+   file, `bundle.bin`, named `readaloud-<book>-<sha8>` after its fingerprint), and makes it the bundle to align next
+   (a tiny dataset, `readaloud-current`, names it). All books use one notebook, `readaloud-align`, which
+   `kaggle_run.py` creates on first use without running it. Open the printed link, check *Accelerator: GPU T4 x2*,
+   press *Run All*: the notebook downloads the bundle `readaloud-current` names, checks its fingerprint and aligns it.
+   Download `results.zip` from the *Output* panel. Keep the notebook open for the next book: the GPU session stays
+   yours (a new session can wait in Kaggle's queue), and the notebook's code never changes between books.
+   `--clean` also deletes the book's datasets for other bundles; `--notebook` saves the repo's notebook as a new
+   version of `readaloud-align` after it changed (reload an open editor to get it). One-time setup: a phone-verified
+   Kaggle account, an API token from kaggle.com/settings/api (*Generate New Token*) saved as
+   `~/.kaggle/access_token`, and, if the notebook asks for it, the same token under *Add-ons → Secrets* as
+   `KAGGLE_API_TOKEN`, switched on for `readaloud-align`. Free accounts get 30 GPU hours a week.
 
-   **Or by hand:** open `readaloud_align.ipynb` on Colab or Kaggle (instructions are in its first cell; on Colab:
+   **Or by hand on Colab (one T4):** open `readaloud_align.ipynb` there (instructions are in its first cell:
    https://colab.research.google.com/github/yuukibarns/readaloud/blob/main/readaloud_align.ipynb), give it
    `bundle.zip`, run all cells, and download `results.zip`.
 
@@ -83,9 +87,9 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
   GPUs one worker process each, every track on one GPU). On a GPU it runs
   in float16: on a whole 15 h book it gave the same sentence times as float32 (a few moved by one 80 ms step), 3.5× faster.
   Also writes `units.json`, the aligner's raw word units per chunk, which the notebook packs into `results.zip`.
-- `kaggle_run.py` — step 2 on Kaggle: uploads the bundle (skipped if unchanged) to its own dataset and saves its own
-  notebook with it as input, without running (Kaggle's `--no-run`, from the Kaggle library pinned to the commit
-  that added it); prints the editor link.
+- `kaggle_run.py` — step 2 on Kaggle: uploads the bundle (skipped if already there) to its own dataset, points
+  `readaloud-current` at it, and creates the notebook `readaloud-align` if it doesn't exist, without running it
+  (Kaggle's `--no-run`, from the Kaggle library pinned to the commit that added it); prints the editor link.
 - `compare.py` — compares two alignment runs, e.g. `--dtype float32` vs float16.
 - `book.py` — the text that is aligned: every `<p>` and `<h1>`–`<h6>` in the spine, except the table-of-contents
   pages the book declares (EPUB 3 nav, EPUB 2 guide `type="toc"`).
