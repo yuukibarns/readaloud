@@ -13,7 +13,7 @@ typically within a few hundredths of a second of the spoken sentence. Built and 
 | Step | Where | Script | Time for a 15 h book |
 |---|---|---|---|
 | 1. Chapter tracks, Deepgram rough transcript, VAD, chunk plan; pack `bundle.zip` | your PC | `prepare.py` (runs `vad.py`, `plan.py`) | ~3 min + Deepgram upload (~140 MB; ~10 min through a slow proxy) |
-| 2. Precise alignment | **Colab / Kaggle GPU** (or your PC's CPU) | `readaloud_align.ipynb` (runs `align.py`) | T4 GPU: ~8 min; CPU: ~1 h 40 min |
+| 2. Precise alignment | **Kaggle / Colab GPU** (or your PC's CPU) | `kaggle_run.py`, or `readaloud_align.ipynb` by hand (runs `align.py`) | Kaggle T4 x2: ~4 min + upload; one T4: ~8 min; CPU: ~1 h 40 min |
 | 3. Build the EPUB | your PC | `build.py` | ~3 min |
 
 Only step 2 needs a GPU, so the notebook does nothing else. Step 1 also prints how well the book matched the audio,
@@ -35,13 +35,19 @@ so a bad EPUB shows up before anything is uploaded.
 2. `uv run prepare.py WORK` — needs ffmpeg and a Deepgram key (`$DEEPGRAM_API_KEY`, or the file
    `~/.config/readaloud/deepgram_key`). Writes `WORK/bundle.zip`. Every step is cached, so re-running is cheap.
 
-3. Open `readaloud_align.ipynb` on Colab or Kaggle (instructions are in its first cell), give it `bundle.zip`,
-   run all cells, and download `results.zip`.
+3. **Kaggle from the terminal (fastest, two GPUs):** `uv run kaggle_run.py WORK` uploads `bundle.zip` as a private
+   Kaggle dataset, runs the notebook on *GPU T4 x2* and puts `results.zip` into `WORK`. One-time setup: a
+   phone-verified Kaggle account, and an API token from kaggle.com/settings/api (*Generate New Token*) saved as
+   `~/.kaggle/access_token`. Free accounts get 30 GPU hours a week.
+
+   **Or by hand:** open `readaloud_align.ipynb` on Colab or Kaggle (instructions are in its first cell; on Colab:
+   https://colab.research.google.com/github/yuukibarns/readaloud/blob/main/readaloud_align.ipynb), give it
+   `bundle.zip`, run all cells, and download `results.zip`.
 
    No GPU at hand? Run it locally instead (CPU, about 9× real time):
    `uv run align.py WORK`
 
-4. Put `results.zip` into `WORK` (no need to unzip it), then `uv run build.py WORK` → `WORK/<title> (readaloud).epub`.
+4. Put `results.zip` into `WORK` if you downloaded it by hand (no need to unzip it), then `uv run build.py WORK` → `WORK/<title> (readaloud).epub`.
 
 Python packages: each script declares its own dependencies inline (PEP 723), so `uv run` creates its environment on
 first use (Python 3.12, CPU-only PyTorch). Scripts can be run from any directory: `uv run /path/to/readaloud/prepare.py WORK`.
@@ -63,9 +69,12 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
   chunks, only before heard sentences, in the first silence after the previous sentence's last heard word.
   Finally every chunk is checked both ways: how much of its text was heard inside its audio, and how much of its
   audio is its text. The chunks that agree least are printed, so a text/audio mismatch shows before the GPU run.
-- `align.py` — Qwen3-ForcedAligner on each chunk with its exact sentences (batched on GPU, resumable). On a GPU it runs
+- `align.py` — Qwen3-ForcedAligner on each chunk with its exact sentences (batched on GPU, resumable; with several
+  GPUs one worker process each, every track on one GPU). On a GPU it runs
   in float16: on a whole 15 h book it gave the same sentence times as float32 (a few moved by one 80 ms step), 3.5× faster.
   Also writes `units.json`, the aligner's raw word units per chunk, which the notebook packs into `results.zip`.
+- `kaggle_run.py` — step 2 on Kaggle without a browser: dataset upload (skipped if the bundle is unchanged), notebook
+  run on GPU T4 x2, `results.zip` download; prints the run's log if it fails.
 - `compare.py` — compares two alignment runs, e.g. `--dtype float32` vs float16.
 - `book.py` — the text that is aligned: every `<p>` and `<h1>`–`<h6>` in the spine, except the table-of-contents
   pages the book declares (EPUB 3 nav, EPUB 2 guide `type="toc"`).

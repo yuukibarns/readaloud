@@ -13,7 +13,8 @@
 """Step 2 (GPU notebook, or locally on CPU): force-align every chunk's audio to its exact book text with Qwen3-ForcedAligner.
 
 usage: python align.py WORK_DIR [--batch N] [--dtype float32|float16|bfloat16] [--every N]
-Uses CUDA when available (batched, float16 by default), otherwise CPU (float32).
+Uses CUDA when available (batched, float16 by default; with several GPUs one worker process each), otherwise CPU
+(float32).
 Writes timings.json with absolute per-sentence start/end, and units.json with the aligner's raw units per chunk
 (times relative to the chunk start).
 Resumable: finished chunks are kept in align-<dtype>/ (one cache per precision, so test runs never mix).
@@ -42,6 +43,7 @@ ap.add_argument("--batch", type=int, default=0, help="chunks per aligner call (d
 ap.add_argument("--dtype", choices=["float32", "float16", "bfloat16"],
                 help="model precision (default: float16 on GPU, float32 on CPU)")
 ap.add_argument("--every", type=int, default=1, help="align only every N-th chunk (test sample)")
+ap.add_argument("--shard", help=argparse.SUPPRESS)       # "i/N": internal, one worker process per GPU
 args = ap.parse_args()
 cfg = load_config(os.path.abspath(args.work))
 W = cfg["work"]
@@ -92,6 +94,45 @@ if not os.path.exists(sig_file) or open(sig_file).read() != signature:
         os.remove(f"{A}/{name}")
     open(sig_file, "w").write(signature)
 todo = [n for n in range(0, len(chunks), args.every) if not os.path.exists(f"{A}/{n:04}.json")]
+
+# Several GPUs (Kaggle's T4 x2): one worker process per GPU. Each track goes to one worker, longest first to the
+# least loaded, so no track is decoded by two processes at once.
+gpus = torch.cuda.device_count() if cuda else 0
+if args.shard:
+    i, n_shards = map(int, args.shard.split("/"))
+    load_of, shard_of = [0.0] * n_shards, {}
+    lengths = {}
+    for c in chunks:
+        lengths[c["track"]] = lengths.get(c["track"], 0.0) + c["end"] - c["start"]
+    for t in sorted(lengths, key=lambda t: -lengths[t]):
+        shard_of[t] = min(range(n_shards), key=lambda k: load_of[k])
+        load_of[shard_of[t]] += lengths[t]
+    todo = [n for n in todo if shard_of[chunks[n]["track"]] == i]
+elif gpus > 1 and len(todo) > 1:
+    import subprocess
+
+    def relay(k, proc):
+        for line in proc.stdout:
+            print(f"GPU {k} | {line}", end="", flush=True)
+
+    procs = []
+    for k in range(gpus):
+        cmd = [sys.executable, os.path.abspath(__file__), args.work, "--shard", f"{k}/{gpus}", "--dtype", args.dtype,
+               "--every", str(args.every)] + (["--batch", str(args.batch)] if args.batch else [])
+        proc = subprocess.Popen(cmd, env={**os.environ, "CUDA_VISIBLE_DEVICES": str(k)}, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        procs.append((proc, threading.Thread(target=relay, args=(k, proc))))
+        procs[-1][1].start()
+    t_all = time.time()
+    for proc, thread in procs:
+        proc.wait()
+        thread.join()
+    if any(proc.returncode for proc, _ in procs):
+        sys.exit("a GPU worker failed - see its output above; run again to resume")
+    total = sum(chunks[n]["end"] - chunks[n]["start"] for n in todo)
+    print(f"{gpus} GPUs: {len(todo)} chunks in {(time.time() - t_all) / 60:.1f} min, "
+          f"{total / (time.time() - t_all):.0f}x realtime overall", flush=True)
+    todo = [n for n in todo if not os.path.exists(f"{A}/{n:04}.json")]
 if todo:
     from qwen_asr import Qwen3ForcedAligner
     if not cuda:
@@ -133,9 +174,11 @@ if todo:
             print(f"out of GPU memory - retrying with batch {batch}", flush=True)
             continue
         for n, units in zip(ns, results):
+            tmp = f"{A}/{n:04}.json.tmp"                  # written whole, then renamed: a resume never sees half a file
             json.dump({"track": chunks[n]["track"], "sentences": timings_for(chunks[n], units),
                        "units": [[u.text, round(u.start_time, 3), round(u.end_time, 3)] for u in units]},
-                      open(f"{A}/{n:04}.json", "w"), ensure_ascii=False)
+                      open(tmp, "w"), ensure_ascii=False)
+            os.replace(tmp, f"{A}/{n:04}.json")
             done += chunks[n]["end"] - chunks[n]["start"]
         for n in ns:
             del loading[n]
@@ -145,6 +188,8 @@ if todo:
         print(f"{finished}/{len(todo)} chunks | {speed:.0f}x realtime | ETA {(total - done) / speed / 60:.1f} min", flush=True)
     print(f"done in {(time.time() - t0) / 60:.1f} min", flush=True)
 
+if args.shard:
+    sys.exit(0)                                   # a GPU worker: the parent process writes the timings
 if args.every > 1:
     sys.exit(f"sample run: chunks are in {A}/ (no timings file written)")
 timings, raw = {}, []

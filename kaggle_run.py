@@ -1,0 +1,122 @@
+# /// script
+# requires-python = "==3.12.*"
+# dependencies = ["kaggle>=2.2"]
+# ///
+"""Step 2 on Kaggle, from the terminal: upload WORK/bundle.zip as a private dataset, run readaloud_align.ipynb on
+Kaggle's GPU T4 x2, and download results.zip into WORK.
+
+usage: uv run kaggle_run.py WORK_DIR
+Needs a Kaggle API token in ~/.kaggle/access_token (kaggle.com/settings/api → Generate New Token) and a
+phone-verified Kaggle account (GPU and internet access). Dataset and notebook are private, named after WORK_DIR.
+Re-running after a failure skips the upload if bundle.zip hasn't changed.
+"""
+import hashlib
+import json
+import os
+import re
+import shutil
+import sys
+import time
+
+from kaggle.api.kaggle_api_extended import KaggleApi
+
+W = os.path.abspath(sys.argv[1])
+HERE = os.path.dirname(os.path.abspath(__file__))
+bundle = f"{W}/bundle.zip"
+if not os.path.exists(bundle):
+    sys.exit(f"no {bundle} - run prepare.py first")
+
+api = KaggleApi()
+api.authenticate()
+user = api.get_config_value("username")
+slug = "readaloud-" + re.sub(r"[^a-z0-9]+", "-", os.path.basename(W).lower()).strip("-")
+dataset, kernel = f"{user}/{slug}", f"{user}/{slug}-align"
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+# --- 1. the bundle as a private dataset (skipped when this exact bundle is already up) ---------------------------
+up = f"{W}/.kaggle-dataset"
+os.makedirs(up, exist_ok=True)
+digest, sent = sha256(bundle), f"{W}/.kaggle-dataset.sha256"
+try:
+    exists = bool(api.dataset_status(dataset))
+except Exception:
+    exists = False
+if exists and os.path.exists(sent) and open(sent).read() == digest:
+    print(f"dataset {dataset}: this bundle is already uploaded")
+else:
+    staged = f"{up}/bundle.zip"
+    if os.path.exists(staged):
+        os.remove(staged)
+    try:
+        os.link(bundle, staged)                      # no copy of 100+ MB when on the same disk
+    except OSError:
+        shutil.copy(bundle, staged)
+    json.dump({"title": slug, "id": dataset, "licenses": [{"name": "unknown"}]},
+              open(f"{up}/dataset-metadata.json", "w"))
+    print(f"uploading {os.path.getsize(bundle) / 1048576:.0f} MB to dataset {dataset} ...", flush=True)
+    if exists:
+        api.dataset_create_version(up, "new bundle", convert_to_csv=False, delete_old_versions=True)
+    else:
+        api.dataset_create_new(up, public=False, convert_to_csv=False)
+    open(sent, "w").write(digest)
+for _ in range(120):                                 # Kaggle processes the upload before a notebook can use it
+    status = str(api.dataset_status(dataset)).lower()
+    if "ready" in status:
+        break
+    time.sleep(15)
+else:
+    sys.exit(f"dataset {dataset} is still '{status}' after 30 min - try again later")
+
+# --- 2. run the notebook on GPU T4 x2 ------------------------------------------------------------------------------
+kd = f"{W}/.kaggle-kernel"
+os.makedirs(kd, exist_ok=True)
+shutil.copy(f"{HERE}/readaloud_align.ipynb", f"{kd}/readaloud_align.ipynb")
+json.dump({"id": kernel, "title": f"{slug}-align", "code_file": "readaloud_align.ipynb", "language": "python",
+           "kernel_type": "notebook", "is_private": "true", "enable_gpu": "true", "enable_internet": "true",
+           "machine_shape": "NvidiaTeslaT4", "dataset_sources": [dataset], "competition_sources": [],
+           "kernel_sources": [], "model_sources": []}, open(f"{kd}/kernel-metadata.json", "w"))
+resp = api.kernels_push(kd)
+if getattr(resp, "error", None):
+    sys.exit(f"Kaggle refused the notebook: {resp.error}")
+print(f"running on Kaggle: {getattr(resp, 'url', '') or 'https://www.kaggle.com/code/' + kernel}", flush=True)
+
+t0, last = time.time(), None
+while True:
+    time.sleep(30)
+    r = api.kernels_status(kernel)
+    status = str(r.status).lower()
+    if status != last:
+        print(f"  {time.time() - t0:5.0f}s  {status}", flush=True)
+        last = status
+    if "complete" in status:
+        break
+    if "error" in status or "cancel" in status:
+        log_dir = f"{W}/.kaggle-log"
+        try:
+            api.kernels_output(kernel, log_dir, file_pattern=r".*\.log$", force=True)
+            for name in os.listdir(log_dir):
+                print(open(f"{log_dir}/{name}", errors="replace").read()[-4000:])
+        except Exception as e:
+            print(f"(couldn't fetch the log: {e})")
+        sys.exit(f"the Kaggle run failed: {getattr(r, 'failure_message', '') or status} - see "
+                 f"https://www.kaggle.com/code/{kernel}")
+
+# --- 3. results.zip into WORK ---------------------------------------------------------------------------------------
+out = f"{W}/.kaggle-output"
+shutil.rmtree(out, ignore_errors=True)
+api.kernels_output(kernel, out, file_pattern=r"(^|/)results\.zip$", force=True)
+found = [os.path.join(d, f) for d, _, fs in os.walk(out) for f in fs if f == "results.zip"]
+if not found:
+    sys.exit(f"the run finished but produced no results.zip - see https://www.kaggle.com/code/{kernel}")
+if os.path.exists(f"{W}/results.zip"):
+    os.replace(f"{W}/results.zip", f"{W}/results.prev.zip")
+shutil.move(found[0], f"{W}/results.zip")
+print(f"done in {(time.time() - t0) / 60:.1f} min: {W}/results.zip - now run: uv run build.py {W}")
