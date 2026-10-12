@@ -22,7 +22,6 @@ Resumable: finished chunks are kept in align-<dtype>/ (one cache per precision, 
 float16 vs float32 on a T4, whole book: identical sentence times except a few that moved by one 80 ms step; 3.5x faster.
 """
 import argparse
-import difflib
 import hashlib
 import json
 import os
@@ -35,7 +34,7 @@ import soundfile
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from book import book_sentences, load_config, norm, track_wav  # noqa: E402
+from book import book_sentences, load_config, sentence_times, spoken_text, track_wav  # noqa: E402
 
 ap = argparse.ArgumentParser()
 ap.add_argument("work")
@@ -57,33 +56,6 @@ sentences = {s["id"]: s for s in book_sentences(cfg)}
 chunks = plan["chunks"]
 cuda = torch.cuda.is_available()
 batch = args.batch or (8 if cuda else 1)
-
-
-def timings_for(c, units):
-    """Map the aligner's units back onto the chunk's sentences, character by character."""
-    sents = [sentences[i] for i in c["sentences"]]
-    U, U_time = [], []
-    for u in units:
-        for ch in norm(u.text):
-            U.append(ch)
-            U_time.append((u.start_time, u.end_time))
-    N = "".join(s["norm"] for s in sents)
-    char_time = [None] * len(N)
-    for blk in difflib.SequenceMatcher(None, N, "".join(U), autojunk=False).get_matching_blocks():
-        for i in range(blk.size):
-            char_time[blk.a + i] = U_time[blk.b + i]
-    result, pos = [], 0
-    for s in sents:
-        own = char_time[pos:pos + len(s["norm"])]
-        span = [t for t in own if t is not None]
-        lead = next((i for i, t in enumerate(own) if t is not None), 0)
-        if span:
-            result.append({"id": s["id"], "start": round(c["start"] + span[0][0] - 0.1 * lead, 3),
-                           "end": round(c["start"] + span[-1][1], 3), "coverage": round(len(span) / len(s["norm"]), 2)})
-        else:
-            result.append({"id": s["id"], "start": None, "end": None, "coverage": 0})
-        pos += len(s["norm"])
-    return result
 
 
 # cached chunk results are only valid for the plan they were made from
@@ -150,7 +122,7 @@ if todo:
             wav = track_wav(cfg, c["track"])
         sr = soundfile.info(wav).samplerate
         audio, _ = soundfile.read(wav, start=int(c["start"] * sr), stop=int(c["end"] * sr), dtype="float32")
-        return (audio, sr), "".join(sentences[i]["text"] for i in c["sentences"])
+        return (audio, sr), "".join(spoken_text(sentences[i]["text"]) for i in c["sentences"])
 
     loader, loading = ThreadPoolExecutor(2), {}
     t0, done, finished = time.time(), 0.0, 0
@@ -175,9 +147,9 @@ if todo:
             continue
         for n, units in zip(ns, results):
             tmp = f"{A}/{n:04}.json.tmp"                  # written whole, then renamed: a resume never sees half a file
-            json.dump({"track": chunks[n]["track"], "sentences": timings_for(chunks[n], units),
-                       "units": [[u.text, round(u.start_time, 3), round(u.end_time, 3)] for u in units]},
-                      open(tmp, "w"), ensure_ascii=False)
+            raw = [[u.text, round(u.start_time, 3), round(u.end_time, 3)] for u in units]
+            json.dump({"track": chunks[n]["track"], "sentences": sentence_times(chunks[n], raw, sentences),
+                       "units": raw}, open(tmp, "w"), ensure_ascii=False)
             os.replace(tmp, f"{A}/{n:04}.json")
             done += chunks[n]["end"] - chunks[n]["start"]
         for n in ns:

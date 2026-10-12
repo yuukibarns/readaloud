@@ -71,7 +71,8 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
   chunks, only before heard sentences, in the first silence after the previous sentence's last heard word.
   Finally every chunk is checked both ways: how much of its text was heard inside its audio, and how much of its
   audio is its text. The chunks that agree least are printed, so a text/audio mismatch shows before the GPU run.
-- `align.py` — Qwen3-ForcedAligner on each chunk with its exact sentences (batched on GPU, resumable; with several
+- `align.py` — Qwen3-ForcedAligner on each chunk with its exact sentences, as spoken (`book.spoken_text`: NFKC,
+  digits as kanji numerals, so 「７」 is aligned as 七) (batched on GPU, resumable; with several
   GPUs one worker process each, every track on one GPU). On a GPU it runs
   in float16: on a whole 15 h book it gave the same sentence times as float32 (a few moved by one 80 ms step), 3.5× faster.
   Also writes `units.json`, the aligner's raw word units per chunk, which the notebook packs into `results.zip`.
@@ -81,9 +82,10 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
 - `book.py` — the text that is aligned: every `<p>` and `<h1>`–`<h6>` in the spine, except the table-of-contents
   pages the book declares (EPUB 3 nav, EPUB 2 guide `type="toc"`).
 - `build.py` — refuses timings aligned from a different `plan.json` (sentence ids are book positions); sentence `<span>`s, one SMIL per document, 64 kbps mono AAC per track, EPUB 3 OPF and nav.
-  Each clip starts 0.15 s before the first sound. Qwen doesn't model silence (after a pause a sentence's first word
-  often starts where the previous word ended), so a start more than that before the next speech onset (VAD) moves
-  to the onset. Where the aligner squeezes quick short lines (でも！, 「うん。) into an
+  Sentence boundaries combine both sources: the aligner doesn't model silence (after a pause a word often "starts"
+  where the previous one ended), but it is sure a sentence is still being spoken when its last word starts and the
+  next has begun when its second word starts; the first VAD silence in between is the boundary (one sentence ends
+  where it begins, the next starts where speech resumes). Each clip starts 0.15 s before that. Where the aligner squeezes quick short lines (でも！, 「うん。) into an
   instant, the span is shared with the next sentence by text length; an end that overruns the next start is cut to it.
 
 ## Known limits

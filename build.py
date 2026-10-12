@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from xml.etree import ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from book import LANG_CODES, OPF_NS, Epub, book_sentences, load_config, paragraphs, text_docs  # noqa: E402
+from book import LANG_CODES, OPF_NS, Epub, book_sentences, load_config, paragraphs, sentence_times, text_docs  # noqa: E402
 
 cfg = load_config(os.path.abspath(sys.argv[1]))
 W = cfg["work"]
@@ -33,16 +33,21 @@ tracks = {t["id"]: t for t in json.load(open(f"{W}/tracks.json"))}
 track_order = list(tracks)
 # timings from the GPU notebook: results.zip as downloaded, or an already extracted timings.json (whichever is newer)
 results, extracted = f"{W}/results.zip", f"{W}/timings.json"
-aligned_chunks = None
+aligned_chunks, units = None, None
 if os.path.exists(results) and (not os.path.exists(extracted) or os.path.getmtime(results) > os.path.getmtime(extracted)):
     z = zipfile.ZipFile(results)
     timings = json.loads(z.read("timings.json"))
     if "units.json" in z.namelist():
-        aligned_chunks = [{k: c[k] for k in ("track", "start", "end", "sentences")} for c in json.loads(z.read("units.json"))]
+        units = json.loads(z.read("units.json"))
+        aligned_chunks = [{k: c[k] for k in ("track", "start", "end", "sentences")} for c in units]
     print("timings from results.zip")
 else:
     timings = json.load(open(extracted))
 sentences = book_sentences(cfg)
+if units:                               # the aligner's raw word units: map them onto sentences with today's book.py
+    by_id = {s["id"]: s for s in sentences}
+    timings = {t["id"]: {**t, "track": c["track"]} for c in units
+               for t in sentence_times(c, c["units"], by_id)}
 # sentence ids are positions in the book: results aligned from another plan would land on the wrong sentences
 plan_chunks = json.load(open(f"{W}/plan.json"))["chunks"]
 if (aligned_chunks if aligned_chunks is not None else set(timings)) != \
@@ -55,29 +60,38 @@ times = []
 for s in sentences:
     t = timings.get(s["id"])
     ok = t and t["start"] is not None and t["end"] >= t["start"]
-    times.append({"track": t["track"], "start": t["start"], "end": t["end"]} if ok else None)
-# Qwen doesn't model silence: after a pause, a sentence's first word often starts where the previous word ended, so
-# the pause counts as part of this sentence (tapping it plays up to ~2 s of silence first). A sentence starts where
-# speech starts: a start more than LEAD before the next speech onset (VAD) moves to that onset, if it comes before
-# the sentence's end. Closer starts are left alone; the clip's LEAD pre-roll covers them.
-vad = json.load(open(f"{W}/vad.json"))
-onsets = {tr: [a for a, _ in segs] for tr, segs in vad.items()}
-snapped = 0
-for t in times:
-    if not t:
-        continue
-    segs, ons = vad.get(t["track"], []), onsets.get(t["track"], [])
-    i = bisect.bisect_right(ons, t["start"]) - 1             # the speech segment starting at or before it
-    if i >= 0 and segs[i][1] - t["start"] > LEAD:
-        continue                                             # well inside speech
-    if i + 1 < len(segs) and segs[i + 1][0] - t["start"] > LEAD and segs[i + 1][0] < t["end"]:
-        t["start"] = segs[i + 1][0]
-        snapped += 1
-print(f"{snapped} sentence starts moved past a pause to where speech starts")
+    times.append({"track": t["track"], "start": t["start"], "end": t["end"], "last_start": t.get("last_start", t["end"]),
+                  "second_start": t.get("second_start", t["start"])} if ok else None)
 for k in range(1, len(times)):          # drop timings that go backwards
     p = next((times[j] for j in range(k - 1, -1, -1) if times[j]), None)
     if times[k] and p and p["track"] == times[k]["track"] and times[k]["start"] < p["start"]:
         times[k] = None
+# Where one sentence ends and the next begins. The aligner doesn't model silence (after a pause a word often "starts"
+# where the previous one ended), but it is sure the previous sentence is still being spoken when its last word starts,
+# and the next one has begun when its second word starts. The pause between them, if any, is the first silence VAD
+# found after the former that begins before the latter: the previous sentence ends where it begins, the next starts
+# where speech resumes. A track's first sentence starting inside a silence starts where that silence ends.
+vad = json.load(open(f"{W}/vad.json"))
+SILENCE = {tr: [(segs[i][1], segs[i + 1][0]) for i in range(len(segs) - 1)] for tr, segs in vad.items()}
+SPEECH_FROM = {tr: segs[0][0] for tr, segs in vad.items() if segs}
+moved, prev = 0, None
+for t in times:
+    if not t:
+        continue
+    gaps = SILENCE.get(t["track"], [])
+    if prev and prev["track"] == t["track"]:
+        i = bisect.bisect_left([a for a, _ in gaps], prev["last_start"])
+        if i < len(gaps) and gaps[i][0] <= t["second_start"] and gaps[i][1] < t["end"]:
+            prev["end"] = min(prev["end"], gaps[i][0])
+            moved += t["start"] != gaps[i][1]
+            t["start"] = gaps[i][1]
+    else:
+        inside = [g for g in [(0.0, SPEECH_FROM.get(t["track"], 0.0))] + gaps if g[0] <= t["start"] < g[1]]
+        if inside and inside[0][1] < t["end"]:
+            moved += 1
+            t["start"] = inside[0][1]
+    prev = t
+print(f"sentence boundaries placed in the pause between sentences: {moved} starts moved")
 nxt = None                              # an end that overruns the next sentence's start: trust the start
 for k in range(len(times) - 1, -1, -1):
     if times[k]:

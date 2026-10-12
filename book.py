@@ -1,8 +1,10 @@
 """Shared helpers: project config, reading any EPUB's spine, Japanese sentence splitting, text normalisation."""
+import difflib
 import json
 import os
 import posixpath
 import re
+import unicodedata
 import xml.etree.ElementTree as ET
 import zipfile
 from html import unescape
@@ -24,6 +26,36 @@ def load_config(work):
     cfg["work"] = work
     cfg["epub_path"] = cfg["epub"] if os.path.isabs(cfg["epub"]) else os.path.join(work, cfg["epub"])
     return cfg
+
+
+DIG = "〇一二三四五六七八九"
+
+
+def kanji_number(s):
+    """Digits -> kanji numeral as read aloud (1970 -> 千九百七十); leading zeros digit by digit."""
+    if s.startswith("0") and len(s) > 1 or len(s) > 16:
+        return "".join(DIG[int(c)] for c in s)
+    n = int(s)
+    if n == 0:
+        return "〇"
+    out = ""
+    for unit, big in ((10 ** 12, "兆"), (10 ** 8, "億"), (10 ** 4, "万"), (1, "")):
+        q, n = divmod(n, unit)
+        if q:
+            part = ""
+            for u, name in ((1000, "千"), (100, "百"), (10, "十"), (1, "")):
+                d, q = divmod(q, u)
+                if d:
+                    part += ("" if d == 1 and name else DIG[d]) + name
+            out += part + big
+    return out
+
+
+def spoken_text(text):
+    """Text as it is read aloud, for the aligner: NFKC (full-width digits, circled numbers, Kangxi radicals) and digit
+    runs as kanji numerals (「７」 -> 七, 1970 -> 千九百七十). The aligner can't match a digit symbol to the spoken word."""
+    text = unicodedata.normalize("NFKC", text)
+    return re.sub(r"\d+", lambda m: kanji_number(m.group()), text)
 
 
 def norm(s):
@@ -161,5 +193,41 @@ def book_sentences(cfg):
     for f in text_docs(cfg, epub):
         for m, pieces in paragraphs(epub.read(f)):
             for _, text in pieces:
-                out.append({"id": f"s{len(out):05}", "file": f, "text": text, "norm": norm(text)})
+                out.append({"id": f"s{len(out):05}", "file": f, "text": text, "norm": norm(spoken_text(text))})
     return out
+
+
+def sentence_times(chunk, units, sentences_by_id):
+    """Map the aligner's word units back onto a chunk's sentences, character by character.
+
+    units: [(text, start, end)] in seconds from the chunk's start. For each sentence: absolute start and end (of its
+    first and last aligned unit), its coverage, and two moments the aligner is sure about even when it is unsure about
+    pauses (it doesn't model silence: after a pause a word often "starts" where the previous one ended):
+    last_start, when its last word starts (it is still being spoken then), and second_start, when its second word
+    starts (it has begun by then; its end for a one-word sentence).
+    """
+    sents = [sentences_by_id[i] for i in chunk["sentences"]]
+    U, U_unit = [], []
+    for k, (text, _, _) in enumerate(units):
+        for ch in norm(text):
+            U.append(ch)
+            U_unit.append(k)
+    N = "".join(s["norm"] for s in sents)
+    char_unit = [None] * len(N)
+    for blk in difflib.SequenceMatcher(None, N, "".join(U), autojunk=False).get_matching_blocks():
+        for i in range(blk.size):
+            char_unit[blk.a + i] = U_unit[blk.b + i]
+    t0, result, pos = chunk["start"], [], 0
+    for s in sents:
+        own = char_unit[pos:pos + len(s["norm"])]
+        ks = sorted({k for k in own if k is not None})
+        if ks:
+            first, last = units[ks[0]], units[ks[-1]]
+            second = units[ks[1]][1] if len(ks) > 1 else first[2]
+            result.append({"id": s["id"], "start": round(t0 + first[1], 3), "end": round(t0 + last[2], 3),
+                           "second_start": round(t0 + second, 3), "last_start": round(t0 + last[1], 3),
+                           "coverage": round(sum(k is not None for k in own) / len(s["norm"]), 2)})
+        else:
+            result.append({"id": s["id"], "start": None, "end": None, "coverage": 0})
+        pos += len(s["norm"])
+    return result
