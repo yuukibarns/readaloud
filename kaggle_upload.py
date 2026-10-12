@@ -2,12 +2,13 @@
 # requires-python = "==3.12.*"
 # dependencies = ["kaggle @ git+https://github.com/Kaggle/kaggle-cli@9c57dd74c29904c40ff7879eed33644be89d2e2f"]
 # ///
-"""Step 2 on Kaggle: upload WORK/bundle.zip and point the alignment notebook at it; you press Run All there.
+"""Step 2 on Kaggle: upload WORK/bundle.zip; then align it in the notebook readaloud-align.
 
-usage: uv run kaggle_run.py WORK_DIR [--clean] [--notebook]
-Then, in the notebook readaloud-align (printed link; keep it open between books, so the GPU session stays yours
-instead of queueing again): Accelerator GPU T4 x2, Run All, and download results.zip from the Output panel into
-WORK_DIR.
+usage: uv run kaggle_upload.py WORK_DIR [--clean] [--notebook]
+Uploads only: run it whenever a bundle is ready (several books, one after another, also while the notebook is
+aligning another). In readaloud-align (printed link; keep it open between books, so the GPU session stays yours
+instead of queueing again): set BOOK at the top of step 2 (empty: the bundle uploaded last), Accelerator GPU T4 x2,
+Run All, and download results.zip from the Output panel into WORK_DIR.
   --clean:    also delete this book's datasets for other bundles (and notebooks of the older one-per-bundle setup)
   --notebook: save the repo's readaloud_align.ipynb as a new version of readaloud-align (after the notebook
               changed; an open editor session keeps its own copy until you reload it)
@@ -16,10 +17,9 @@ Needs a Kaggle API token in ~/.kaggle/access_token (kaggle.com/settings/api → 
 phone-verified Kaggle account (GPU and internet access).
 
 Each bundle is uploaded once, as one file (bundle.bin; Kaggle would unpack a .zip into many files), to its own
-private dataset named after the book and the bundle's fingerprint, readaloud-<book>-<sha8>. A tiny dataset,
-readaloud-current, names the bundle to align: the notebook reads it, downloads that bundle through the Kaggle API
-and checks its fingerprint. So the notebook never changes between books, and is created only once (saved without
-running).
+private dataset named after the book and the bundle's fingerprint, readaloud-<book>-<sha8>. The notebook lists
+these, downloads the chosen one through the Kaggle API and checks its fingerprint; it never changes between books
+and is created only once (saved without running).
 
 (The Kaggle library is pinned to the commit that added --no-run, not yet in a release; Kaggle calls are retried
 when the connection drops.)
@@ -100,43 +100,7 @@ while True:                                             # Kaggle processes the u
                  f"https://www.kaggle.com/datasets/{dataset} and run this again")
     time.sleep(10)
 
-# --- 2. readaloud-current: the bundle the notebook aligns next --------------------------------------------------
-pointer = f"{user}/readaloud-current"
-pd = f"{W}/.kaggle-current"
-shutil.rmtree(pd, ignore_errors=True)
-os.makedirs(pd)
-
-
-def pointer_names():
-    """The bundle readaloud-current names now (None if it doesn't exist or can't be read)."""
-    try:
-        call(api.dataset_download_file)(pointer, "current.txt", f"{pd}/check", force=True, quiet=True, unzip=True)
-        return open(f"{pd}/check/current.txt").read().strip()
-    except (HTTPError, OSError):
-        return None
-
-
-if pointer_names() != slug:
-    up = f"{pd}/up"
-    os.makedirs(up)
-    open(f"{up}/current.txt", "w").write(slug + "\n")
-    json.dump({"title": "readaloud-current", "id": pointer, "licenses": [{"name": "unknown"}]},
-              open(f"{up}/dataset-metadata.json", "w"))
-    if status_of(pointer) is None:
-        resp = call(api.dataset_create_new)(up, public=False, quiet=True, convert_to_csv=False)
-    else:
-        resp = call(api.dataset_create_version)(up, slug, quiet=True, convert_to_csv=False, delete_old_versions=True)
-    if resp.error:
-        sys.exit(f"Kaggle refused readaloud-current: {resp.error}")
-    t_wait = time.time()
-    while pointer_names() != slug:                      # until a download really gives the new version
-        if time.time() - t_wait > 600:
-            sys.exit(f"{pointer} doesn't name {slug} after 10 min - check https://www.kaggle.com/datasets/{pointer}")
-        time.sleep(5)
-shutil.rmtree(pd, ignore_errors=True)
-print(f"readaloud-current: {slug}")
-
-# --- 3. the notebook: created once, updated only on request ---------------------------------------------------
+# --- 2. the notebook: created once, updated only on request ---------------------------------------------------
 kernel = f"{user}/readaloud-align"
 exists = any(k.ref == kernel for k in call(api.kernels_list)(mine=True, search="readaloud-align"))
 if not exists or "--notebook" in sys.argv[2:]:
@@ -154,7 +118,7 @@ if not exists or "--notebook" in sys.argv[2:]:
     shutil.rmtree(kd, ignore_errors=True)
     print(f"notebook {kernel}: {'saved a new version' if exists else 'created'} (not run)")
 
-# --- 4. on request: this book's datasets for other bundles, and notebooks of the one-per-bundle setup -----------
+# --- 3. on request: this book's datasets for other bundles, and notebooks of the one-per-bundle setup -----------
 if CLEAN:
     own = re.compile(re.escape(book) + r"(-[0-9a-f]{8})?")
     for d in call(api.dataset_list)(mine=True, search=book):
@@ -167,10 +131,14 @@ if CLEAN:
         if name.endswith("-align") and own.fullmatch(name[:-len("-align")]):
             call(api.kernels_delete)(k.ref, no_confirm=True)
             print(f"  deleted the notebook {k.ref}")
+    if status_of(f"{user}/readaloud-current") is not None:              # the older setup's pointer dataset
+        call(api.dataset_delete)(user, "readaloud-current", no_confirm=True)
+        print(f"  deleted the dataset {user}/readaloud-current")
 
 print(f"""
-ready. In https://www.kaggle.com/code/{kernel}/edit (keep it open for the next book):
-  - Settings: Accelerator GPU T4 x2
-  - Run All (it aligns {slug})
+uploaded: {slug}
+In https://www.kaggle.com/code/{kernel}/edit (keep it open for the next book):
+  - step 2: BOOK = "{book[len('readaloud-'):]}"  (or "" if this is the bundle you uploaded last)
+  - Settings: Accelerator GPU T4 x2, then Run All
   - when it's done, download results.zip from the Output panel into {W}
 then: uv run build.py {W}""")
