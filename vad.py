@@ -88,8 +88,9 @@ if __name__ == "__main__":
     tracks = [t["id"] for t in json.load(open(os.path.join(cfg["work"], "tracks.json")))]
     todo = [t for t in tracks if not os.path.exists(f"{PROBS}/{t}.npy")]
     if todo:
-        print(f"VAD on {len(todo)} tracks with {WORKERS} processes ...", flush=True)
-        with ProcessPoolExecutor(min(len(todo), WORKERS)) as ex:
+        workers = min(len(todo), WORKERS)
+        print(f"VAD on {len(todo)} tracks with {workers} process{'es' if workers > 1 else ''} ...", flush=True)
+        with ProcessPoolExecutor(workers) as ex:
             for done, f in enumerate(as_completed([ex.submit(probabilities, t) for t in todo]), 1):
                 print(f"vad {done}/{len(todo)} {f.result()[0]}", flush=True)
     out = {t: segments(t, soundfile.info(track_wav(cfg, t)).frames) for t in tracks}
