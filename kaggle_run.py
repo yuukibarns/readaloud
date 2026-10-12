@@ -2,19 +2,20 @@
 # requires-python = "==3.12.*"
 # dependencies = ["kaggle>=2.2"]
 # ///
-"""Step 2 on Kaggle, from the terminal: upload WORK/bundle.zip as a private dataset, run readaloud_align.ipynb on
-Kaggle's GPU T4 x2, and download results.zip into WORK.
+"""Step 2 on Kaggle: upload WORK/bundle.zip and set up the alignment notebook with it; you press Run All.
 
-usage: uv run kaggle_run.py WORK_DIR [--download]
-  --download: don't upload or start anything, just wait for the latest run and fetch its results.zip
-              (e.g. after the laptop slept and this script was interrupted; the run itself goes on at Kaggle)
+usage: uv run kaggle_run.py WORK_DIR
+Then open the printed link, check Accelerator: GPU T4 x2, Run All (an interactive session gets a GPU within seconds;
+background runs started from here could wait in Kaggle's queue for an hour), and download results.zip from the
+Output panel into WORK_DIR.
+
 Needs a Kaggle API token in ~/.kaggle/access_token (kaggle.com/settings/api → Generate New Token) and a
 phone-verified Kaggle account (GPU and internet access).
 
-Every bundle gets its own private dataset, named after the book and the bundle's fingerprint
-(readaloud-<book>-<sha8>), which is never changed afterwards; the notebook (readaloud-<book>-align) is pushed with
-exactly that dataset as its input. So a run can never pick up an older bundle, and re-running with the same bundle
-skips the upload. After a successful run, the book's datasets for other bundles are deleted.
+The bundle goes up as one file, bundle.bin (Kaggle would unpack a .zip into many files, which then take long to
+attach to a session), in its own private dataset named after the book and the bundle's fingerprint
+(readaloud-<book>-<sha8>). The notebook (readaloud-<book>-align) is saved without running, with that dataset as
+input and the fingerprint written into it, so it refuses any other bundle. The book's other datasets are deleted.
 """
 import hashlib
 import json
@@ -25,10 +26,11 @@ import sys
 import time
 
 from kaggle.api.kaggle_api_extended import KaggleApi
+from kagglesdk.kernels.services.kernels_api_service import KernelsApiClient
+from kagglesdk.kernels.types.kernels_enums import KernelExecutionType
 from requests.exceptions import HTTPError
 
 W = os.path.abspath(sys.argv[1])
-DOWNLOAD_ONLY = "--download" in sys.argv[2:]
 HERE = os.path.dirname(os.path.abspath(__file__))
 bundle = f"{W}/bundle.zip"
 if not os.path.exists(bundle):
@@ -57,105 +59,86 @@ def status_of(ref):
         return None
 
 
-slug = f"{book}-{sha256(bundle)[:8]}"
+fingerprint = sha256(bundle)[:8]
+slug = f"{book}-{fingerprint}"
 dataset = f"{user}/{slug}"
 
-if not DOWNLOAD_ONLY:
-    # --- 1. this bundle as its own dataset ---------------------------------------------------------------------
-    if status_of(dataset) is not None:
+# --- 1. this bundle as its own dataset, one file ----------------------------------------------------------------
+if status_of(dataset) is not None:
+    files = [f.name for f in api.dataset_list_files(dataset).files]
+    if files == ["bundle.bin"]:
         print(f"dataset {dataset}: this bundle is already uploaded")
-    else:
-        up = f"{W}/.kaggle-dataset"
-        shutil.rmtree(up, ignore_errors=True)
-        os.makedirs(up)
-        try:
-            os.link(bundle, f"{up}/bundle.zip")              # no copy of 100+ MB when on the same disk
-        except OSError:
-            shutil.copy(bundle, f"{up}/bundle.zip")
-        json.dump({"title": slug, "id": dataset, "licenses": [{"name": "unknown"}]},
-                  open(f"{up}/dataset-metadata.json", "w"))
-        print(f"uploading {os.path.getsize(bundle) / 1048576:.0f} MB to dataset {dataset} ...", flush=True)
-        resp = api.dataset_create_new(up, public=False, convert_to_csv=False)
-        if resp.error:
-            sys.exit(f"Kaggle refused the dataset: {resp.error}")
-        shutil.rmtree(up, ignore_errors=True)
-    status, t_wait = None, time.time()
-    while True:                                         # Kaggle processes the upload before a notebook can use it
-        now = status_of(dataset)
-        if now != status:
-            print(f"  dataset {now or 'not visible yet'}", flush=True)
-            status = now
-        if status and "ready" in status:
-            break
-        if time.time() - t_wait > 1800:
-            sys.exit(f"dataset {dataset} is still '{status or 'not visible'}' after 30 min - check "
-                     f"https://www.kaggle.com/datasets/{dataset} and run this again")
-        time.sleep(15)
-
-    # --- 2. the notebook, with exactly this dataset as input, run on GPU T4 x2 ---------------------------------
-    kd = f"{W}/.kaggle-kernel"
-    os.makedirs(kd, exist_ok=True)
-    shutil.copy(f"{HERE}/readaloud_align.ipynb", f"{kd}/readaloud_align.ipynb")
-    json.dump({"id": kernel, "title": f"{book}-align", "code_file": "readaloud_align.ipynb", "language": "python",
-               "kernel_type": "notebook", "is_private": "true", "enable_gpu": "true", "enable_internet": "true",
-               "machine_shape": "NvidiaTeslaT4", "dataset_sources": [dataset], "competition_sources": [],
-               "kernel_sources": [], "model_sources": []}, open(f"{kd}/kernel-metadata.json", "w"))
-    resp = api.kernels_push(kd)
-    if getattr(resp, "error", None):
-        sys.exit(f"Kaggle refused the notebook: {resp.error}")
-    print(f"running on Kaggle: https://www.kaggle.com/code/{kernel}  (Kaggle may queue it for a while first)",
-          flush=True)
-else:
-    print(f"waiting for the latest run of https://www.kaggle.com/code/{kernel} ...", flush=True)
-
-# --- 3. wait for the run ----------------------------------------------------------------------------------------
-t0, last = time.time(), None
-while True:
-    if last is not None or not DOWNLOAD_ONLY:
-        time.sleep(30)
+    else:                                               # an older upload Kaggle unpacked: replace it
+        api.dataset_delete(user, slug, no_confirm=True)
+        print(f"deleted {dataset} (it held the unpacked bundle)")
+        time.sleep(10)
+if status_of(dataset) is None:
+    up = f"{W}/.kaggle-dataset"
+    shutil.rmtree(up, ignore_errors=True)
+    os.makedirs(up)
     try:
-        r = api.kernels_status(kernel)
-    except Exception as e:                              # a network hiccup (e.g. after sleep): keep waiting
-        print(f"  (status check failed: {e}; retrying)", flush=True)
-        last = last or "unknown"
-        continue
-    status = str(r.status).lower()
-    if status != last:
-        print(f"  {time.time() - t0:5.0f}s  {status}", flush=True)
-        last = status
-    if "complete" in status:
+        os.link(bundle, f"{up}/bundle.bin")              # no copy of 100+ MB when on the same disk
+    except OSError:
+        shutil.copy(bundle, f"{up}/bundle.bin")
+    json.dump({"title": slug, "id": dataset, "licenses": [{"name": "unknown"}]},
+              open(f"{up}/dataset-metadata.json", "w"))
+    print(f"uploading {os.path.getsize(bundle) / 1048576:.0f} MB to dataset {dataset} ...", flush=True)
+    resp = api.dataset_create_new(up, public=False, convert_to_csv=False)
+    if resp.error:
+        sys.exit(f"Kaggle refused the dataset: {resp.error}")
+    shutil.rmtree(up, ignore_errors=True)
+status, t_wait = None, time.time()
+while True:                                             # Kaggle processes the upload before a notebook can use it
+    now = status_of(dataset)
+    if now != status:
+        print(f"  dataset {now or 'not visible yet'}", flush=True)
+        status = now
+    if status and "ready" in status:
         break
-    if "error" in status or "cancel" in status:
-        log_dir = f"{W}/.kaggle-log"
+    if time.time() - t_wait > 1800:
+        sys.exit(f"dataset {dataset} is still '{status or 'not visible'}' after 30 min - check "
+                 f"https://www.kaggle.com/datasets/{dataset} and run this again")
+    time.sleep(10)
+
+# --- 2. the notebook, saved without running: this dataset as input, its fingerprint written in ------------------
+kd = f"{W}/.kaggle-kernel"
+os.makedirs(kd, exist_ok=True)
+nb = json.load(open(f"{HERE}/readaloud_align.ipynb"))
+for cell in nb["cells"]:
+    src = "".join(cell["source"])
+    if 'EXPECTED_BUNDLE = ""' in src:
+        cell["source"] = src.replace('EXPECTED_BUNDLE = ""', f'EXPECTED_BUNDLE = "{fingerprint}"').splitlines(True)
+json.dump(nb, open(f"{kd}/readaloud_align.ipynb", "w"), ensure_ascii=False, indent=1)
+json.dump({"id": kernel, "title": f"{book}-align", "code_file": "readaloud_align.ipynb", "language": "python",
+           "kernel_type": "notebook", "is_private": "true", "enable_gpu": "true", "enable_internet": "true",
+           "machine_shape": "NvidiaTeslaT4", "dataset_sources": [dataset], "competition_sources": [],
+           "kernel_sources": [], "model_sources": []}, open(f"{kd}/kernel-metadata.json", "w"))
+save = KernelsApiClient.save_kernel                     # this library version can't ask for a save without a run:
+
+
+def quick_save(self, request=None):                     # set it on the request (Kaggle's "Quick Save")
+    request.kernel_execution_type = KernelExecutionType.QUICK_SAVE
+    return save(self, request)
+
+
+KernelsApiClient.save_kernel = quick_save
+resp = api.kernels_push(kd)
+if getattr(resp, "error", None):
+    sys.exit(f"Kaggle refused the notebook: {resp.error}")
+
+# --- 3. the book's datasets for other bundles are no longer used ------------------------------------------------
+for d in api.dataset_list(mine=True, search=book):
+    name = d.ref.split("/")[-1]
+    if name != slug and (name == book or re.fullmatch(re.escape(book) + r"-[0-9a-f]{8}", name)):
         try:
-            api.kernels_output(kernel, log_dir, file_pattern=r".*\.log$", force=True)
-            for name in os.listdir(log_dir):
-                print(open(f"{log_dir}/{name}", errors="replace").read()[-4000:])
+            api.dataset_delete(user, name, no_confirm=True)
+            print(f"  deleted the old dataset {user}/{name}")
         except Exception as e:
-            print(f"(couldn't fetch the log: {e})")
-        sys.exit(f"the Kaggle run failed: {getattr(r, 'failure_message', '') or status} - see "
-                 f"https://www.kaggle.com/code/{kernel}")
+            print(f"  (couldn't delete {user}/{name}: {e})")
 
-# --- 4. results.zip into WORK -----------------------------------------------------------------------------------
-out = f"{W}/.kaggle-output"
-shutil.rmtree(out, ignore_errors=True)
-api.kernels_output(kernel, out, file_pattern=r"(^|/)results\.zip$", force=True)
-found = [os.path.join(d, f) for d, _, fs in os.walk(out) for f in fs if f == "results.zip"]
-if not found:
-    sys.exit(f"the run finished but produced no results.zip - see https://www.kaggle.com/code/{kernel}")
-if os.path.exists(f"{W}/results.zip"):
-    os.replace(f"{W}/results.zip", f"{W}/results.prev.zip")
-shutil.move(found[0], f"{W}/results.zip")
-print(f"done in {(time.time() - t0) / 60:.1f} min: {W}/results.zip")
-
-# --- 5. delete this book's datasets for other bundles (never the one just used) ---------------------------------
-if not DOWNLOAD_ONLY:
-    for d in api.dataset_list(mine=True, search=book):
-        name = d.ref.split("/")[-1]
-        if name != slug and (name == book or re.fullmatch(re.escape(book) + r"-[0-9a-f]{8}", name)):
-            try:
-                api.dataset_delete(user, name, no_confirm=True)
-                print(f"  deleted the old dataset {user}/{name}")
-            except Exception as e:
-                print(f"  (couldn't delete {user}/{name}: {e})")
-print(f"now run: uv run build.py {W}")
+print(f"""
+ready. Open https://www.kaggle.com/code/{kernel}/edit
+  - Accelerator: GPU T4 x2 (Settings), input: {slug}
+  - Run All
+  - when it's done, download results.zip from the Output panel into {W}
+then: uv run build.py {W}""")

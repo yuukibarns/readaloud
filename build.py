@@ -40,7 +40,7 @@ if os.path.exists(results) and (not os.path.exists(extracted) or os.path.getmtim
     timings = json.loads(z.read("timings.json"))
     if "units.json" in z.namelist():
         units = json.loads(z.read("units.json"))
-        aligned_chunks = [{k: c[k] for k in ("track", "start", "end", "sentences")} for c in units]
+        aligned_chunks = [{k: c[k] for k in ("track", "start", "end", "sentences")} for c in units]  # see chunk_keys
     print("timings from results.zip")
 else:
     timings = json.load(open(extracted))
@@ -58,8 +58,10 @@ if units:                               # the aligner's raw word units: map them
                for t in sentence_times(c, c["units"], by_id)}
 # sentence ids are positions in the book: results aligned from another plan would land on the wrong sentences
 plan_chunks = json.load(open(f"{W}/plan.json"))["chunks"]
+chunk_keys = ("track", "start", "end", "sentences")       # what defines a chunk (plan.json also records extra_speech)
 if (aligned_chunks if aligned_chunks is not None else set(timings)) != \
-        (plan_chunks if aligned_chunks is not None else {i for c in plan_chunks for i in c["sentences"]}):
+        ([{k: c[k] for k in chunk_keys} for c in plan_chunks] if aligned_chunks is not None
+         else {i for c in plan_chunks for i in c["sentences"]}):
     sys.exit("these timings were aligned from a different plan.json than the current one - "
              "upload the current bundle.zip, align again, and use its results.zip")
 

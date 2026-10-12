@@ -35,14 +35,12 @@ so a bad EPUB shows up before anything is uploaded.
 2. `uv run prepare.py WORK` — needs ffmpeg and a Deepgram key (`$DEEPGRAM_API_KEY`, or the file
    `~/.config/readaloud/deepgram_key`). Writes `WORK/bundle.zip`. Every step is cached, so re-running is cheap.
 
-3. **Kaggle from the terminal (fastest, two GPUs):** `uv run kaggle_run.py WORK` uploads `bundle.zip` as a private
-   Kaggle dataset, runs the notebook on *GPU T4 x2* and puts `results.zip` into `WORK`. One-time setup: a
-   phone-verified Kaggle account, and an API token from kaggle.com/settings/api (*Generate New Token*) saved as
-   `~/.kaggle/access_token`. Free accounts get 30 GPU hours a week. The run goes on at Kaggle if the script is
-   interrupted (e.g. the laptop sleeps): `uv run kaggle_run.py WORK --download` then just waits for it and fetches
-   `results.zip`, without starting another run. Each bundle gets its own dataset (`readaloud-<book>-<fingerprint>`),
-   so a run can never use an older bundle; the book's datasets for other bundles are deleted after a successful run.
-   Kaggle may queue a run for a while before it starts.
+3. **Kaggle (two GPUs):** `uv run kaggle_run.py WORK` uploads `bundle.zip` (as one file, `bundle.bin`, to a
+   private dataset named after its fingerprint) and saves the notebook with it as input, without running it. Open
+   the printed link, check *Accelerator: GPU T4 x2*, press *Run All* (an interactive session gets a GPU within
+   seconds; background runs can wait in Kaggle's queue for an hour), and download `results.zip` from the *Output*
+   panel. One-time setup: a phone-verified Kaggle account, and an API token from kaggle.com/settings/api
+   (*Generate New Token*) saved as `~/.kaggle/access_token`. Free accounts get 30 GPU hours a week.
 
    **Or by hand:** open `readaloud_align.ipynb` on Colab or Kaggle (instructions are in its first cell; on Colab:
    https://colab.research.google.com/github/yuukibarns/readaloud/blob/main/readaloud_align.ipynb), give it
@@ -73,6 +71,9 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
   chunks, only before heard sentences, in the first silence after the previous sentence's last heard word.
   Finally every chunk is checked both ways: how much of its text was heard inside its audio, and how much of its
   audio is its text. The chunks that agree least are printed, so a text/audio mismatch shows before the GPU run.
+  Speech in a chunk that belongs to no text (a picture read aloud, e.g. a newspaper advert or a title set as an
+  image; an announcement) is recorded as `extra_speech`: VAD speech whose every transcribed character the alignment
+  found no book text for, with no sentence located over it. `align.py` leaves it out of the aligner's audio.
 - `align.py` — Qwen3-ForcedAligner on each chunk with its exact sentences, as spoken (`book.spoken_text`: NFKC,
   digits as kanji numerals, so 「７」 is aligned as 七). The aligner doesn't model silence, so it never gets long
   pauses: every pause VAD found is shortened to 0.2 s before aligning, and word times are mapped back (a start in a
@@ -80,12 +81,14 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
   GPUs one worker process each, every track on one GPU). On a GPU it runs
   in float16: on a whole 15 h book it gave the same sentence times as float32 (a few moved by one 80 ms step), 3.5× faster.
   Also writes `units.json`, the aligner's raw word units per chunk, which the notebook packs into `results.zip`.
-- `kaggle_run.py` — step 2 on Kaggle without a browser: dataset upload (skipped if the bundle is unchanged), notebook
-  run on GPU T4 x2, `results.zip` download; prints the run's log if it fails.
+- `kaggle_run.py` — step 2 on Kaggle: uploads the bundle (skipped if unchanged) and saves the notebook with it as
+  input, without running; prints the editor link.
 - `compare.py` — compares two alignment runs, e.g. `--dtype float32` vs float16.
 - `book.py` — the text that is aligned: every `<p>` and `<h1>`–`<h6>` in the spine, except the table-of-contents
   pages the book declares (EPUB 3 nav, EPUB 2 guide `type="toc"`).
-- `build.py` — refuses results aligned from a different `plan.json` (sentence ids are book positions) or by a
+- `build.py` — prints a quality report (also `WORK/report.txt`): coverage, silent headings, clip sanity, silence
+  before a tapped sentence, narration outside every clip, agreement with Deepgram and the largest disagreements.
+  Refuses results aligned from a different `plan.json` (sentence ids are book positions) or by a
   different `align.py` (results carry its fingerprint); sentence `<span>`s, one SMIL per document, 64 kbps mono AAC per track, EPUB 3 OPF and nav.
   Sentence boundaries combine both sources: the aligner doesn't model silence (after a pause a word often "starts"
   where the previous one ended), but it is sure a sentence is still being spoken when its last word starts and the
