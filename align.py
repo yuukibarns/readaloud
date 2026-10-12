@@ -61,7 +61,8 @@ batch = args.batch or (8 if cuda else 1)
 
 # The aligner doesn't model silence: after a pause a word "starts" where the previous one ended, a short word spoken
 # alone before a long pause collapses onto the words after it, and quiet lines between pauses get squeezed. So it
-# never sees long pauses: every pause VAD found in a chunk is shortened to GAP (speech keeps PAD on both sides, so
+# never sees long pauses, nor speech that belongs to no text (plan.py's extra_speech: a picture read aloud, an
+# announcement): every pause VAD found in a chunk is shortened to GAP (speech keeps PAD on both sides, so
 # VAD's tight edges never clip a sound), and word times are mapped back to the recording - a start inside a
 # shortened pause to where speech resumes, an end to where it stopped. (Without vad.json: the audio as it is.)
 GAP, PAD = 0.2, 0.05
@@ -73,8 +74,9 @@ VAD = json.load(open(f"{W}/vad.json")) if os.path.exists(f"{W}/vad.json") else N
 def shorten_pauses(audio, sr, c):
     """The chunk's speech with pauses shortened, and pieces [(start, end) in the chunk, start in the new audio]."""
     length, spans = c["end"] - c["start"], []
+    extra = c.get("extra_speech", [])                           # speech that belongs to no text: left out too
     for a, b in VAD.get(c["track"], []):
-        if b > c["start"] and a < c["end"]:
+        if b > c["start"] and a < c["end"] and not any(x0 <= a and b <= x1 for x0, x1 in extra):
             a, b = max(0.0, a - c["start"] - PAD), min(length, b - c["start"] + PAD)
             if spans and a <= spans[-1][1]:                     # padding closed the pause: one span
                 spans[-1] = (spans[-1][0], b)

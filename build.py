@@ -80,6 +80,9 @@ for k in range(1, len(times)):          # drop timings that go backwards
 # found after the former that begins before the latter: the previous sentence ends where it begins, the next starts
 # where speech resumes. A track's first sentence starting inside a silence starts where that silence ends.
 vad = json.load(open(f"{W}/vad.json"))
+# speech that belongs to no text (plan.py's extra_speech) isn't the narration of any sentence: not speech here
+extra = {(c["track"], tuple(x)) for c in plan_chunks for x in c.get("extra_speech", [])}
+vad = {tr: [g for g in segs if (tr, (round(g[0], 3), round(g[1], 3))) not in extra] for tr, segs in vad.items()}
 SILENCE = {tr: [(segs[i][1], segs[i + 1][0]) for i in range(len(segs) - 1)] for tr, segs in vad.items()}
 SPEECH_FROM = {tr: segs[0][0] for tr, segs in vad.items() if segs}
 moved, prev = 0, None
@@ -104,8 +107,7 @@ print(f"sentence boundaries placed in the pause between sentences: {moved} start
 # 限定された; 「部活、…」). Then the speech segment holding that word belongs to no sentence. If Deepgram heard this
 # sentence's first sound (the middle of its first character) inside such an unclaimed speech segment before the
 # aligner's start, the sentence starts there.
-heard_from = {r["id"]: r for r in json.load(open(f"{W}/plan.json"))["sentences"] if r.get("first_heard") is not None
-              and not r.get("unheard")}
+heard_from = {r["id"]: r for r in json.load(open(f"{W}/plan.json"))["sentences"] if r.get("heard_from_start")}
 SPEECH = {tr: segs for tr, segs in vad.items()}
 reclaimed, prev = 0, None
 for s, t in zip(sentences, times):
@@ -333,3 +335,80 @@ with zipfile.ZipFile(tmp, "w") as z:
         z.write(f"{W}/epub_audio/{tid}.m4a", f"{audio_dir}/{tid}.m4a".lstrip("/"), compress_type=zipfile.ZIP_STORED)
 os.replace(tmp, OUT)
 print(f"wrote {OUT} ({os.path.getsize(OUT) / 1048576:.0f} MB, {hms(sum(smil_dur.values()))} of narration)")
+
+# --- quality report (also saved as WORK/report.txt) -------------------------------------------------------------
+plan_of = {r["id"]: r for r in json.load(open(f"{W}/plan.json"))["sentences"]}
+lines = []
+
+
+def say(text=""):
+    lines.append(text)
+
+
+def pct(xs, q):
+    return xs[min(len(xs) - 1, int(q * len(xs)))] if xs else 0.0
+
+
+timed = [(s, t, c) for s, t, c in zip(sentences, times, clips) if c]
+say(f"quality report for {title}")
+say(f"  sentences with audio: {len(timed)} of {len(sentences)}")
+silent = [s for s, c in zip(sentences, clips) if not c]
+if silent:
+    pages = {}
+    for s in silent:
+        pages.setdefault(posixpath.basename(s["file"]), []).append(s["text"].strip()[:24])
+    say("  without audio, by page: " + "; ".join(f"{p} ({len(v)}: {v[0]}...)" for p, v in pages.items()))
+heads = [s for s in sentences if s.get("heading")]
+silent_heads = [s["text"].strip() for s, c in zip(sentences, clips) if s.get("heading") and not c]
+say(f"  headings with audio: {len(heads) - len(silent_heads)} of {len(heads)}"
+    + (f"; silent: {silent_heads}" if silent_heads else ""))
+durs = [c["end"] - c["begin"] for _, _, c in timed]
+say(f"  clips empty or reversed: {sum(d <= 0 for d in durs)}, under 0.2 s: {sum(d < 0.2 for d in durs)}")
+rates = sorted(len(s["norm"]) / (t["end"] - t["start"]) for s, t, _ in timed
+               if len(s["norm"]) >= 10 and t["end"] > t["start"])
+pace = pct(rates, 0.5)
+fast = [s for s, t, _ in timed if len(s["norm"]) >= 6 and len(s["norm"]) / max(1e-6, t["end"] - t["start"]) > 3 * pace]
+say(f"  reading pace (median): {pace:.1f} chars/s; sentences timed faster than 3x that: {len(fast)}"
+    + (f" {[s['text'].strip()[:20] for s in fast[:5]]}" if fast else ""))
+onsets = {tr: [a for a, _ in segs] for tr, segs in vad.items()}
+
+
+def silence_before(tr, a):                     # from a clip's start to the first speech after it
+    segs, ons = vad.get(tr, []), onsets.get(tr, [])
+    i = bisect.bisect_right(ons, a) - 1
+    if i >= 0 and a < segs[i][1]:
+        return 0.0
+    return segs[i + 1][0] - a if i + 1 < len(segs) else 0.0
+
+
+lead = sorted(silence_before(c["track"], c["begin"]) for _, _, c in timed)
+say(f"  silence before the narrator when a sentence is tapped: median {pct(lead, .5):.2f} s, 99% {pct(lead, .99):.2f} s,"
+    f" over 0.5 s: {sum(x > 0.5 for x in lead)}")
+spans = {}
+for _, _, c in timed:
+    spans.setdefault(c["track"], []).append((c["begin"], c["end"]))
+speech_total, outside = 0.0, {}
+for tr, segs in vad.items():
+    cs = sorted(spans.get(tr, []))
+    for a, b in segs:
+        speech_total += b - a
+        free = b - a - sum(max(0.0, min(b, e) - max(a, st)) for st, e in cs)
+        if free > 0.05:
+            outside[tr] = outside.get(tr, 0.0) + free
+say(f"  narration outside every clip: {sum(outside.values()):.0f} s of {speech_total / 3600:.1f} h of speech"
+    + (" (most in " + ", ".join(f"{tr} {v:.0f} s" for tr, v in sorted(outside.items(), key=lambda x: -x[1])[:3]) + ")"
+       if outside else ""))
+diffs = []
+for s, t, _ in timed:
+    r = plan_of.get(s["id"], {})
+    if r.get("heard_from_start") and r.get("track") == t["track"]:
+        diffs.append((abs(t["start"] - r["first_heard"]), s, t, r))
+d = sorted(x[0] for x in diffs)
+off = sorted((x for x in diffs if x[0] > 1.0), key=lambda x: -x[0])
+say(f"  sentence start vs where Deepgram heard its first sound (sentences heard from their start): median {pct(d, .5):.2f} s, 95% {pct(d, .95):.2f} s;"
+    f" more than 1 s apart: {len(off)} (Deepgram is wrong in some of these; the largest are worth a listen)")
+for gap, s, t, r in off[:8]:
+    say(f"      {t['track']} {t['start']:8.1f} s (Deepgram {r['first_heard']:8.1f} s)  {s['text'].strip()[:30]}")
+say(f"  boundary rules: {moved} starts placed in the pause before them, {reclaimed} given back their first word")
+print("\n".join(lines))
+open(f"{W}/report.txt", "w").write("\n".join(lines) + "\n")

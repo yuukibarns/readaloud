@@ -196,12 +196,14 @@ rates = sorted((sent_start[k + 1] - sent_start[k]) / (H_pos[x[-1]][2] - H_pos[x[
 RATE = rates[len(rates) // 2]
 print(f"narrator's pace: {RATE:.1f} reading chars/s (median of {len(rates)} fully heard sentences)")
 
+book_char_of = {r2h[r]: r for r in range(len(R)) if heard[r]}   # transcript char -> the book char heard there
 rough = [None] * len(sentences)
 for k, run in enumerate(found):
     if run:
         rough[k] = {"track": H_pos[run[0]][0], "start": H_pos[run[0]][1], "end": H_pos[run[-1]][2],
                     "last_heard": H_pos[run[-1]][1],           # start of its last heard character
-                    "first_heard": (H_pos[run[0]][1] + H_pos[run[0]][2]) / 2}   # middle of its first one
+                    "first_heard": (H_pos[run[0]][1] + H_pos[run[0]][2]) / 2,   # middle of its first one
+                    "heard_from_start": book_char_of[run[0]] == sent_start[k]}  # ... and that is its first char
 
 # Sentences Deepgram didn't catch between two heard ones on the same track (quick short lines: 「え？」,
 # 「ふーん……」) are in the audio if the time between their neighbours could hold them, at no more than twice
@@ -308,6 +310,30 @@ for track, ks in by_track.items():
             if next_start is not None:
                 first, g_start = ks[i + 1], end
 
+# --- speech in a chunk that belongs to no text: a picture read aloud (a newspaper advert, a title set as an image),
+# an announcement. A VAD speech segment counts if every character Deepgram heard in it is one the alignment found no
+# book text for (an insertion, not a misheard word) and no sentence is located over it. align.py removes it from the
+# aligner's audio together with the pauses: the aligner should only hear speech that belongs to its text.
+aligned_h = {h for h in r2h if h >= 0}
+heard_at_t = {}
+for h, (tr, a0, b0) in enumerate(H_pos):
+    heard_at_t.setdefault(tr, []).append(((a0 + b0) / 2, h))
+idx = {s["id"]: k for k, s in enumerate(sentences)}
+for c in chunks:
+    located = [(rough[idx[i]]["start"], rough[idx[i]]["end"]) for i in c["sentences"] if rough[idx[i]]]
+    extra = []
+    for a0, b0 in vad[c["track"]]:
+        if b0 <= c["start"] or a0 >= c["end"]:
+            continue
+        hs = [h for t, h in heard_at_t.get(c["track"], []) if a0 <= t <= b0]
+        if hs and not any(h in aligned_h for h in hs) and not any(st < b0 and en > a0 for st, en in located):
+            extra.append([round(a0, 3), round(b0, 3)])
+    if extra:
+        c["extra_speech"] = extra
+n_extra = [x for c in chunks for x in c.get("extra_speech", [])]
+print(f"speech that belongs to no text, kept from the aligner: {len(n_extra)} segments, "
+      f"{sum(b0 - a0 for a0, b0 in n_extra):.0f} s")
+
 # --- check: each chunk's text should be what is heard in its audio, and its audio should be its text ---------
 idx = {s["id"]: k for k, s in enumerate(sentences)}
 book_of = {r2h[r]: r for r in range(len(R)) if heard[r]}     # transcript char -> the book char heard there
@@ -317,7 +343,8 @@ for h, (tr, t0, _) in enumerate(H_pos):
 report = []
 for n, c in enumerate(chunks):
     ks = {idx[i] for i in c["sentences"]}
-    inside = [h for t0, h in heard_at.get(c["track"], []) if c["start"] <= t0 < c["end"]]
+    inside = [h for t0, h in heard_at.get(c["track"], []) if c["start"] <= t0 < c["end"]       # what the aligner hears
+              and not any(x0 <= t0 <= x1 for x0, x1 in c.get("extra_speech", []))]
     text = sum(sent_start[k + 1] - sent_start[k] for k in ks)
     text_ok = sum(1 for h in inside if h in book_of and R_sent[book_of[h]] in ks)
     report.append((min(text_ok / max(1, text), text_ok / max(1, len(inside))), n, text_ok / max(1, text),

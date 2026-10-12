@@ -187,13 +187,14 @@ def text_docs(cfg, epub):
 
 
 def book_sentences(cfg):
-    """All sentences in reading order: dicts with id, file (zip path), text, norm."""
+    """All sentences in reading order: dicts with id, file (zip path), text, norm (spoken characters), heading."""
     epub = Epub(cfg["epub_path"])
     out = []
     for f in text_docs(cfg, epub):
         for m, pieces in paragraphs(epub.read(f)):
             for _, text in pieces:
-                out.append({"id": f"s{len(out):05}", "file": f, "text": text, "norm": norm(spoken_text(text))})
+                out.append({"id": f"s{len(out):05}", "file": f, "text": text, "norm": norm(spoken_text(text)),
+                            "heading": m.group("tag") != "p"})
     return out
 
 
