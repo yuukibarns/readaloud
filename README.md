@@ -40,9 +40,9 @@ so a bad EPUB shows up before anything is uploaded.
    phone-verified Kaggle account, and an API token from kaggle.com/settings/api (*Generate New Token*) saved as
    `~/.kaggle/access_token`. Free accounts get 30 GPU hours a week. The run goes on at Kaggle if the script is
    interrupted (e.g. the laptop sleeps): `uv run kaggle_run.py WORK --download` then just waits for it and fetches
-   `results.zip`, without starting another run. Background runs can wait in Kaggle's queue for half an hour or more;
-   `uv run kaggle_run.py WORK --upload-only` only uploads and prints the notebook's editor link, where *Run All* gets
-   a GPU within seconds (then download `results.zip` from the *Output* panel).
+   `results.zip`, without starting another run. Each bundle gets its own dataset (`readaloud-<book>-<fingerprint>`),
+   so a run can never use an older bundle; the book's datasets for other bundles are deleted after a successful run.
+   Kaggle may queue a run for a while before it starts.
 
    **Or by hand:** open `readaloud_align.ipynb` on Colab or Kaggle (instructions are in its first cell; on Colab:
    https://colab.research.google.com/github/yuukibarns/readaloud/blob/main/readaloud_align.ipynb), give it
@@ -85,7 +85,8 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
 - `compare.py` — compares two alignment runs, e.g. `--dtype float32` vs float16.
 - `book.py` — the text that is aligned: every `<p>` and `<h1>`–`<h6>` in the spine, except the table-of-contents
   pages the book declares (EPUB 3 nav, EPUB 2 guide `type="toc"`).
-- `build.py` — refuses timings aligned from a different `plan.json` (sentence ids are book positions); sentence `<span>`s, one SMIL per document, 64 kbps mono AAC per track, EPUB 3 OPF and nav.
+- `build.py` — refuses results aligned from a different `plan.json` (sentence ids are book positions) or by a
+  different `align.py` (results carry its fingerprint); sentence `<span>`s, one SMIL per document, 64 kbps mono AAC per track, EPUB 3 OPF and nav.
   Sentence boundaries combine both sources: the aligner doesn't model silence (after a pause a word often "starts"
   where the previous one ended), but it is sure a sentence is still being spoken when its last word starts and the
   next has begun when its second word starts; the first VAD silence in between is the boundary (one sentence ends

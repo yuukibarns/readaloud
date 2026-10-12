@@ -8,6 +8,7 @@ usage: python build.py WORK_DIR [OUTPUT.epub]      (reads timings from WORK_DIR/
 Adds sentence <span>s, one SMIL media overlay per text document, one AAC file per track, an EPUB 3 OPF and nav.
 """
 import bisect
+import hashlib
 import html
 import json
 import os
@@ -44,6 +45,13 @@ if os.path.exists(results) and (not os.path.exists(extracted) or os.path.getmtim
 else:
     timings = json.load(open(extracted))
 sentences = book_sentences(cfg)
+# results from a different aligner than this one (an older bundle, a stale notebook input) are refused
+here_aligner = hashlib.sha256(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "align.py"),
+                                   "rb").read()).hexdigest()[:12]
+made_by = {c.get("aligner") for c in units} if units else {None}
+if made_by != {here_aligner}:
+    sys.exit(f"these results were made by a different align.py ({', '.join(sorted(str(m) for m in made_by))}; "
+             f"this one is {here_aligner}) - run prepare.py, align the new bundle.zip, and use its results.zip")
 if units:                               # the aligner's raw word units: map them onto sentences with today's book.py
     by_id = {s["id"]: s for s in sentences}
     timings = {t["id"]: {**t, "track": c["track"]} for c in units

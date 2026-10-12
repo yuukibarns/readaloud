@@ -65,8 +65,9 @@ batch = args.batch or (8 if cuda else 1)
 # VAD's tight edges never clip a sound), and word times are mapped back to the recording - a start inside a
 # shortened pause to where speech resumes, an end to where it stopped. (Without vad.json: the audio as it is.)
 GAP, PAD = 0.2, 0.05
+# results carry a fingerprint of this file: build.py refuses results from a different aligner
+ALIGNER = hashlib.sha256(open(os.path.abspath(__file__), "rb").read()).hexdigest()[:12]
 VAD = json.load(open(f"{W}/vad.json")) if os.path.exists(f"{W}/vad.json") else None
-PAUSES_SHORTENED = f"pauses shortened to {GAP}s" if VAD else ""
 
 
 def shorten_pauses(audio, sr, c):
@@ -103,7 +104,7 @@ def to_recording(x, pieces, is_start):
 
 
 # cached chunk results are only valid for the plan (and method) they were made from
-signature = hashlib.sha256((json.dumps(chunks, sort_keys=True) + PAUSES_SHORTENED).encode()).hexdigest()
+signature = hashlib.sha256((json.dumps(chunks, sort_keys=True) + ALIGNER).encode()).hexdigest()
 sig_file = f"{A}/plan.sha256"
 if not os.path.exists(sig_file) or open(sig_file).read() != signature:
     for name in os.listdir(A):
@@ -220,7 +221,7 @@ for n in range(len(chunks)):
     d = json.load(open(f"{A}/{n:04}.json"))
     for s in d["sentences"]:
         timings[s["id"]] = {**s, "track": d["track"]}
-    raw.append({**chunks[n], "units": d.get("units")})
+    raw.append({**chunks[n], "units": d.get("units"), "aligner": ALIGNER})
 json.dump(timings, open(f"{W}/timings.json", "w"), ensure_ascii=False)
 json.dump(raw, open(f"{W}/units.json", "w"), ensure_ascii=False)          # the aligner's own output, for diagnosis
 print(f"timings.json ({args.dtype}):", sum(1 for t in timings.values() if t["start"] is not None), "sentences with times")
