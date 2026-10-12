@@ -107,25 +107,6 @@ for t in times:
             t["start"] = inside[0][1]
     prev = t
 print(f"sentence boundaries placed in the pause between sentences: {moved} starts moved by more than 0.1 s")
-# The aligner collapses a short word spoken alone before a pause onto the words after it (a section number: 七 ...
-# 限定された; 「部活、…」). Then the speech segment holding that word belongs to no sentence. If Deepgram heard this
-# sentence's first sound (the middle of its first character) inside such an unclaimed speech segment before the
-# aligner's start, the sentence starts there.
-heard_from = {r["id"]: r for r in json.load(open(f"{W}/plan.json"))["sentences"] if r.get("heard_from_start")}
-SPEECH = {tr: segs for tr, segs in speech.items()}
-reclaimed, prev = 0, None
-for s, t in zip(sentences, times):
-    if not t:
-        continue
-    r = heard_from.get(s["id"])
-    if r and r["track"] == t["track"] and r["first_heard"] < t["start"]:
-        seg = next((g for g in SPEECH.get(t["track"], []) if g[0] <= r["first_heard"] < g[1]), None)
-        claimed_until = prev["end"] if prev and prev["track"] == t["track"] else 0.0
-        if seg and seg[1] <= t["start"] and seg[0] >= claimed_until:
-            t["start"] = seg[0]
-            reclaimed += 1
-    prev = t
-print(f"sentence starts moved back to their unclaimed first word: {reclaimed}")
 nxt = None                              # an end that overruns the next sentence's start: trust the start
 for k in range(len(times) - 1, -1, -1):
     if times[k]:
@@ -413,6 +394,6 @@ say(f"  sentence start vs where Deepgram heard its first sound (sentences heard 
     f" more than 1 s apart: {len(off)} (Deepgram is wrong in some of these; the largest are worth a listen)")
 for gap, s, t, r in off[:8]:
     say(f"      {t['track']} {t['start']:8.1f} s (Deepgram {r['first_heard']:8.1f} s)  {s['text'].strip()[:30]}")
-say(f"  boundary rules: {moved} starts moved over 0.1 s into the pause before them, {reclaimed} given back their first word")
+say(f"  boundary rule: {moved} starts moved over 0.1 s to where speech resumes after the pause before them")
 print("\n".join(lines))
 open(f"{W}/report.txt", "w").write("\n".join(lines) + "\n")

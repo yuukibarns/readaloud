@@ -106,9 +106,7 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
   Sentence boundaries combine both sources: the aligner doesn't model silence (after a pause a word often "starts"
   where the previous one ended), but it is sure a sentence is still being spoken when its last word starts and the
   next has begun when its second word starts; the first pause in between is the boundary (one sentence ends
-  where it begins, the next starts where speech resumes). The aligner also collapses a short word spoken alone
-  before a pause (a section number 「七」, 「部活、…」) onto the words after it; if Deepgram heard a sentence's first
-  sound inside a speech segment that no sentence covers, the sentence starts there. Each clip starts 0.15 s
+  where it begins, the next starts where speech resumes). Each clip starts 0.15 s
   before its start. Where the aligner squeezes quick short lines (でも！, 「うん。) into an
   instant, the span is shared with the next sentence by text length; an end that overruns the next start is cut to it.
 
