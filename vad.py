@@ -43,14 +43,17 @@ def probabilities(track_id):
     model.reset_states()
     probs, n = [], 0
     # read in blocks (a whole track is ~1 GB as float32; one process per core would exhaust memory)
-    for block in soundfile.blocks(track_wav(cfg, track_id), blocksize=512 * 4096, dtype="float32"):
-        n += len(block)
-        block = torch.from_numpy(block)
-        for i in range(0, len(block), 512):                     # what silero's get_speech_timestamps does
-            chunk = block[i:i + 512]
-            if len(chunk) < 512:                                # only at the very end (blocks are 512-aligned)
-                chunk = torch.nn.functional.pad(chunk, (0, 512 - len(chunk)))
-            probs.append(model(chunk, 16000).item())
+    # inference_mode, as silero's get_speech_timestamps uses no_grad: else autograd keeps every step of the model's
+    # recurrent state, and memory grows with the track (a 106 min track passed 1.7 GB)
+    with torch.inference_mode():
+        for block in soundfile.blocks(track_wav(cfg, track_id), blocksize=512 * 4096, dtype="float32"):
+            n += len(block)
+            block = torch.from_numpy(block)
+            for i in range(0, len(block), 512):                 # what silero's get_speech_timestamps does
+                chunk = block[i:i + 512]
+                if len(chunk) < 512:                            # only at the very end (blocks are 512-aligned)
+                    chunk = torch.nn.functional.pad(chunk, (0, 512 - len(chunk)))
+                probs.append(model(chunk, 16000).item())
     np.save(f"{PROBS}/{track_id}.npy", np.array(probs, dtype=np.float32))
     return track_id, n
 
