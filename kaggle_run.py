@@ -19,6 +19,7 @@ import sys
 import time
 
 from kaggle.api.kaggle_api_extended import KaggleApi
+from requests.exceptions import HTTPError
 
 W = os.path.abspath(sys.argv[1])
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -45,10 +46,15 @@ def sha256(path):
 up = f"{W}/.kaggle-dataset"
 os.makedirs(up, exist_ok=True)
 digest, sent = sha256(bundle), f"{W}/.kaggle-dataset.sha256"
-try:
-    exists = bool(api.dataset_status(dataset))
-except Exception:
-    exists = False
+def status_of(ref):
+    """The dataset's processing status, or None while Kaggle doesn't (yet) know it (it answers 403/404 then)."""
+    try:
+        return str(api.dataset_status(ref)).lower()
+    except HTTPError:
+        return None
+
+
+exists = status_of(dataset) is not None
 if exists and os.path.exists(sent) and open(sent).read() == digest:
     print(f"dataset {dataset}: this bundle is already uploaded")
 else:
@@ -62,18 +68,29 @@ else:
     json.dump({"title": slug, "id": dataset, "licenses": [{"name": "unknown"}]},
               open(f"{up}/dataset-metadata.json", "w"))
     print(f"uploading {os.path.getsize(bundle) / 1048576:.0f} MB to dataset {dataset} ...", flush=True)
+    resp = None
+    if not exists:
+        resp = api.dataset_create_new(up, public=False, convert_to_csv=False)
+        if resp.error and "already in use" in resp.error:   # created by an earlier attempt: add a version instead
+            exists = True
     if exists:
-        api.dataset_create_version(up, "new bundle", convert_to_csv=False, delete_old_versions=True)
-    else:
-        api.dataset_create_new(up, public=False, convert_to_csv=False)
+        resp = api.dataset_create_version(up, "new bundle", convert_to_csv=False, delete_old_versions=True)
+    if resp.error:
+        sys.exit(f"Kaggle refused the dataset: {resp.error}")
+    print(f"dataset: {getattr(resp, 'url', '') or 'https://www.kaggle.com/datasets/' + dataset}", flush=True)
     open(sent, "w").write(digest)
-for _ in range(120):                                 # Kaggle processes the upload before a notebook can use it
-    status = str(api.dataset_status(dataset)).lower()
-    if "ready" in status:
+status, t_wait = None, time.time()
+while time.time() - t_wait < 1800:                  # Kaggle processes the upload before a notebook can use it
+    now = status_of(dataset)
+    if now != status:
+        print(f"  dataset {now or 'not visible yet'}", flush=True)
+        status = now
+    if status and "ready" in status:
         break
     time.sleep(15)
 else:
-    sys.exit(f"dataset {dataset} is still '{status}' after 30 min - try again later")
+    sys.exit(f"dataset {dataset} is still '{status or 'not visible'}' after 30 min - check "
+             f"https://www.kaggle.com/datasets/{dataset} and run this again")
 
 # --- 2. run the notebook on GPU T4 x2 ------------------------------------------------------------------------------
 kd = f"{W}/.kaggle-kernel"
