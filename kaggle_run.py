@@ -110,7 +110,7 @@ os.makedirs(pd)
 def pointer_names():
     """The bundle readaloud-current names now (None if it doesn't exist or can't be read)."""
     try:
-        call(api.dataset_download_files)(pointer, f"{pd}/check", force=True, quiet=True, unzip=True)
+        call(api.dataset_download_file)(pointer, "current.txt", f"{pd}/check", force=True, quiet=True, unzip=True)
         return open(f"{pd}/check/current.txt").read().strip()
     except (HTTPError, OSError):
         return None
