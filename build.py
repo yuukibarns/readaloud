@@ -7,6 +7,7 @@
 usage: python build.py WORK_DIR [OUTPUT.epub]      (reads timings from WORK_DIR/results.zip or timings.json)
 Adds sentence <span>s, one SMIL media overlay per text document, one AAC file per track, an EPUB 3 OPF and nav.
 """
+import bisect
 import html
 import json
 import os
@@ -55,6 +56,24 @@ for s in sentences:
     t = timings.get(s["id"])
     ok = t and t["start"] is not None and t["end"] >= t["start"]
     times.append({"track": t["track"], "start": t["start"], "end": t["end"]} if ok else None)
+# Qwen doesn't model silence: after a pause, a sentence's first word often starts where the previous word ended, so
+# the pause counts as part of this sentence (tapping it plays up to ~2 s of silence first). A sentence starts where
+# speech starts: a start more than LEAD before the next speech onset (VAD) moves to that onset, if it comes before
+# the sentence's end. Closer starts are left alone; the clip's LEAD pre-roll covers them.
+vad = json.load(open(f"{W}/vad.json"))
+onsets = {tr: [a for a, _ in segs] for tr, segs in vad.items()}
+snapped = 0
+for t in times:
+    if not t:
+        continue
+    segs, ons = vad.get(t["track"], []), onsets.get(t["track"], [])
+    i = bisect.bisect_right(ons, t["start"]) - 1             # the speech segment starting at or before it
+    if i >= 0 and segs[i][1] - t["start"] > LEAD:
+        continue                                             # well inside speech
+    if i + 1 < len(segs) and segs[i + 1][0] - t["start"] > LEAD and segs[i + 1][0] < t["end"]:
+        t["start"] = segs[i + 1][0]
+        snapped += 1
+print(f"{snapped} sentence starts moved past a pause to where speech starts")
 for k in range(1, len(times)):          # drop timings that go backwards
     p = next((times[j] for j in range(k - 1, -1, -1) if times[j]), None)
     if times[k] and p and p["track"] == times[k]["track"] and times[k]["start"] < p["start"]:

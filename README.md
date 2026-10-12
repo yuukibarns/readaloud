@@ -81,7 +81,9 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
 - `book.py` — the text that is aligned: every `<p>` and `<h1>`–`<h6>` in the spine, except the table-of-contents
   pages the book declares (EPUB 3 nav, EPUB 2 guide `type="toc"`).
 - `build.py` — refuses timings aligned from a different `plan.json` (sentence ids are book positions); sentence `<span>`s, one SMIL per document, 64 kbps mono AAC per track, EPUB 3 OPF and nav.
-  Each clip starts 0.15 s before the first sound. Where the aligner squeezes quick short lines (でも！, 「うん。) into an
+  Each clip starts 0.15 s before the first sound. Qwen doesn't model silence (after a pause a sentence's first word
+  often starts where the previous word ended), so a start more than that before the next speech onset (VAD) moves
+  to the onset. Where the aligner squeezes quick short lines (でも！, 「うん。) into an
   instant, the span is shared with the next sentence by text length; an end that overruns the next start is cut to it.
 
 ## Known limits
