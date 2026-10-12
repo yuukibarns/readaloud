@@ -69,7 +69,9 @@ def probabilities(track_id):
                 if len(chunk) < 512:                            # only at the very end (blocks are 512-aligned)
                     chunk = torch.nn.functional.pad(chunk, (0, 512 - len(chunk)))
                 probs.append(model(chunk, 16000).item())
-    np.save(f"{PROBS}/{track_id}.npy", np.array(probs, dtype=np.float32))
+    tmp = f"{PROBS}/{track_id}.tmp.npy"                         # written whole, then renamed: a run killed while
+    np.save(tmp, np.array(probs, dtype=np.float32))             # saving never leaves a half file that counts as done
+    os.replace(tmp, f"{PROBS}/{track_id}.npy")
     return track_id, n
 
 
@@ -86,7 +88,16 @@ if __name__ == "__main__":
     import soundfile
     os.makedirs(PROBS, exist_ok=True)
     tracks = [t["id"] for t in json.load(open(os.path.join(cfg["work"], "tracks.json")))]
-    todo = [t for t in tracks if not os.path.exists(f"{PROBS}/{t}.npy")]
+
+    def complete(t):
+        """This track's probabilities are saved, one per 512-sample frame of its audio."""
+        import numpy as np
+        try:
+            return len(np.load(f"{PROBS}/{t}.npy", mmap_mode="r")) == -(-soundfile.info(track_wav(cfg, t)).frames // 512)
+        except (OSError, ValueError):
+            return False
+
+    todo = [t for t in tracks if not complete(t)]
     if todo:
         workers = min(len(todo), WORKERS)
         print(f"VAD on {len(todo)} tracks with {workers} process{'es' if workers > 1 else ''} ...", flush=True)
