@@ -92,6 +92,26 @@ for t in times:
             t["start"] = inside[0][1]
     prev = t
 print(f"sentence boundaries placed in the pause between sentences: {moved} starts moved")
+# The aligner collapses a short word spoken alone before a pause onto the words after it (a section number: 七 ...
+# 限定された; 「部活、…」). Then the speech segment holding that word belongs to no sentence. If Deepgram heard this
+# sentence's first sound (the middle of its first character) inside such an unclaimed speech segment before the
+# aligner's start, the sentence starts there.
+heard_from = {r["id"]: r for r in json.load(open(f"{W}/plan.json"))["sentences"] if r.get("first_heard") is not None
+              and not r.get("unheard")}
+SPEECH = {tr: segs for tr, segs in vad.items()}
+reclaimed, prev = 0, None
+for s, t in zip(sentences, times):
+    if not t:
+        continue
+    r = heard_from.get(s["id"])
+    if r and r["track"] == t["track"] and r["first_heard"] < t["start"]:
+        seg = next((g for g in SPEECH.get(t["track"], []) if g[0] <= r["first_heard"] < g[1]), None)
+        claimed_until = prev["end"] if prev and prev["track"] == t["track"] else 0.0
+        if seg and seg[1] <= t["start"] and seg[0] >= claimed_until:
+            t["start"] = seg[0]
+            reclaimed += 1
+    prev = t
+print(f"sentence starts moved back to their unclaimed first word: {reclaimed}")
 nxt = None                              # an end that overruns the next sentence's start: trust the start
 for k in range(len(times) - 1, -1, -1):
     if times[k]:

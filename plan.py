@@ -200,7 +200,8 @@ rough = [None] * len(sentences)
 for k, run in enumerate(found):
     if run:
         rough[k] = {"track": H_pos[run[0]][0], "start": H_pos[run[0]][1], "end": H_pos[run[-1]][2],
-                    "last_heard": H_pos[run[-1]][1]}           # start of its last heard character
+                    "last_heard": H_pos[run[-1]][1],           # start of its last heard character
+                    "first_heard": (H_pos[run[0]][1] + H_pos[run[0]][2]) / 2}   # middle of its first one
 
 # Sentences Deepgram didn't catch between two heard ones on the same track (quick short lines: 「え？」,
 # 「ふーん……」) are in the audio if the time between their neighbours could hold them, at no more than twice
