@@ -1,0 +1,158 @@
+# /// script
+# requires-python = "==3.12.*"
+# dependencies = ["torch", "qwen-asr==0.0.6", "soundfile"]
+#
+# [tool.uv.sources]
+# torch = { index = "pytorch-cpu" }
+#
+# [[tool.uv.index]]
+# name = "pytorch-cpu"
+# url = "https://download.pytorch.org/whl/cpu"
+# explicit = true
+# ///
+"""Step 2 (GPU notebook, or locally on CPU): force-align every chunk's audio to its exact book text with Qwen3-ForcedAligner.
+
+usage: python align.py WORK_DIR [--batch N] [--dtype float32|float16|bfloat16] [--every N]
+Uses CUDA when available (batched, float16 by default), otherwise CPU (float32).
+Writes timings.json with absolute per-sentence start/end, and units.json with the aligner's raw units per chunk
+(times relative to the chunk start).
+Resumable: finished chunks are kept in align-<dtype>/ (one cache per precision, so test runs never mix).
+--every N aligns only every N-th chunk (a quick sample for tests; no timings file is written).
+float16 vs float32 on a T4, whole book: identical sentence times except a few that moved by one 80 ms step; 3.5x faster.
+"""
+import argparse
+import difflib
+import hashlib
+import json
+import os
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+import soundfile
+import torch
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from book import book_sentences, load_config, norm, track_wav  # noqa: E402
+
+ap = argparse.ArgumentParser()
+ap.add_argument("work")
+ap.add_argument("--batch", type=int, default=0, help="chunks per aligner call (default: 8 on GPU, 1 on CPU)")
+ap.add_argument("--dtype", choices=["float32", "float16", "bfloat16"],
+                help="model precision (default: float16 on GPU, float32 on CPU)")
+ap.add_argument("--every", type=int, default=1, help="align only every N-th chunk (test sample)")
+args = ap.parse_args()
+cfg = load_config(os.path.abspath(args.work))
+W = cfg["work"]
+args.dtype = args.dtype or ("float16" if torch.cuda.is_available() else "float32")
+if args.dtype != "float32" and not torch.cuda.is_available():
+    sys.exit("half precision is only useful on a GPU")
+A = f"{W}/align-{args.dtype}"                     # chunk cache for this precision
+os.makedirs(A, exist_ok=True)
+plan = json.load(open(f"{W}/plan.json"))
+sentences = {s["id"]: s for s in book_sentences(cfg)}
+chunks = plan["chunks"]
+cuda = torch.cuda.is_available()
+batch = args.batch or (8 if cuda else 1)
+
+
+def timings_for(c, units):
+    """Map the aligner's units back onto the chunk's sentences, character by character."""
+    sents = [sentences[i] for i in c["sentences"]]
+    U, U_time = [], []
+    for u in units:
+        for ch in norm(u.text):
+            U.append(ch)
+            U_time.append((u.start_time, u.end_time))
+    N = "".join(s["norm"] for s in sents)
+    char_time = [None] * len(N)
+    for blk in difflib.SequenceMatcher(None, N, "".join(U), autojunk=False).get_matching_blocks():
+        for i in range(blk.size):
+            char_time[blk.a + i] = U_time[blk.b + i]
+    result, pos = [], 0
+    for s in sents:
+        own = char_time[pos:pos + len(s["norm"])]
+        span = [t for t in own if t is not None]
+        lead = next((i for i, t in enumerate(own) if t is not None), 0)
+        if span:
+            result.append({"id": s["id"], "start": round(c["start"] + span[0][0] - 0.1 * lead, 3),
+                           "end": round(c["start"] + span[-1][1], 3), "coverage": round(len(span) / len(s["norm"]), 2)})
+        else:
+            result.append({"id": s["id"], "start": None, "end": None, "coverage": 0})
+        pos += len(s["norm"])
+    return result
+
+
+# cached chunk results are only valid for the plan they were made from
+signature = hashlib.sha256(json.dumps(chunks, sort_keys=True).encode()).hexdigest()
+sig_file = f"{A}/plan.sha256"
+if not os.path.exists(sig_file) or open(sig_file).read() != signature:
+    for name in os.listdir(A):
+        os.remove(f"{A}/{name}")
+    open(sig_file, "w").write(signature)
+todo = [n for n in range(0, len(chunks), args.every) if not os.path.exists(f"{A}/{n:04}.json")]
+if todo:
+    from qwen_asr import Qwen3ForcedAligner
+    if not cuda:
+        torch.set_num_threads(os.cpu_count())
+    model = Qwen3ForcedAligner.from_pretrained("Qwen/Qwen3-ForcedAligner-0.6B", dtype=getattr(torch, args.dtype),
+                                               device_map="cuda:0" if cuda else "cpu")
+    print(f"aligning {len(todo)} chunks on {'GPU ' + torch.cuda.get_device_name(0) if cuda else 'CPU'}, "
+          f"batch {batch}, {args.dtype}", flush=True)
+    # Audio is loaded by background threads (decoding a track on first use) while the GPU aligns the current batch.
+    track_locks = {t: threading.Lock() for t in {chunks[n]["track"] for n in todo}}
+
+    def load(n):
+        c = chunks[n]
+        with track_locks[c["track"]]:            # one decode per track, even if two chunks ask at once
+            wav = track_wav(cfg, c["track"])
+        sr = soundfile.info(wav).samplerate
+        audio, _ = soundfile.read(wav, start=int(c["start"] * sr), stop=int(c["end"] * sr), dtype="float32")
+        return (audio, sr), "".join(sentences[i]["text"] for i in c["sentences"])
+
+    loader, loading = ThreadPoolExecutor(2), {}
+    t0, done, finished = time.time(), 0.0, 0
+    total = sum(chunks[n]["end"] - chunks[n]["start"] for n in todo)
+    queue = list(todo)
+    while queue:
+        for n in queue[:2 * batch]:               # this batch and the next one
+            if n not in loading:
+                loading[n] = loader.submit(load, n)
+        ns = queue[:batch]
+        audios, texts = zip(*(loading[n].result() for n in ns))
+        audios, texts = list(audios), list(texts)
+        try:
+            with torch.inference_mode():          # the library doesn't disable autograd itself
+                results = model.align(audio=audios, text=texts, language=[cfg["language"]] * len(ns))
+        except torch.cuda.OutOfMemoryError:
+            if batch == 1:
+                raise
+            batch = max(1, batch // 2)
+            torch.cuda.empty_cache()
+            print(f"out of GPU memory - retrying with batch {batch}", flush=True)
+            continue
+        for n, units in zip(ns, results):
+            json.dump({"track": chunks[n]["track"], "sentences": timings_for(chunks[n], units),
+                       "units": [[u.text, round(u.start_time, 3), round(u.end_time, 3)] for u in units]},
+                      open(f"{A}/{n:04}.json", "w"), ensure_ascii=False)
+            done += chunks[n]["end"] - chunks[n]["start"]
+        for n in ns:
+            del loading[n]
+        queue = queue[len(ns):]
+        finished += len(ns)
+        speed = done / (time.time() - t0)
+        print(f"{finished}/{len(todo)} chunks | {speed:.0f}x realtime | ETA {(total - done) / speed / 60:.1f} min", flush=True)
+    print(f"done in {(time.time() - t0) / 60:.1f} min", flush=True)
+
+if args.every > 1:
+    sys.exit(f"sample run: chunks are in {A}/ (no timings file written)")
+timings, raw = {}, []
+for n in range(len(chunks)):
+    d = json.load(open(f"{A}/{n:04}.json"))
+    for s in d["sentences"]:
+        timings[s["id"]] = {**s, "track": d["track"]}
+    raw.append({**chunks[n], "units": d.get("units")})
+json.dump(timings, open(f"{W}/timings.json", "w"), ensure_ascii=False)
+json.dump(raw, open(f"{W}/units.json", "w"), ensure_ascii=False)          # the aligner's own output, for diagnosis
+print(f"timings.json ({args.dtype}):", sum(1 for t in timings.values() if t["start"] is not None), "sentences with times")
