@@ -129,12 +129,16 @@ while k < len(times):                   # the aligner squeezes quick short lines
 for k, t in enumerate(times):           # still no duration (e.g. squeezed at the very end of a chunk): untimed
     if t and t["end"] - t["start"] < 0.05:
         times[k] = None
+in_audio = {i for c in plan_chunks for i in c["sentences"]}
 k = 0
-while k < len(times):                   # fill runs of untimed sentences between two timed ones on a track
-    if times[k] is None:
-        j = k
-        while j < len(times) and times[j] is None:
+while k < len(times):                   # fill runs of untimed sentences between two timed ones on a track - only
+    if times[k] is None:                # sentences plan.py located in the audio: not a contents page between the
+        j = k                           # title and the text, whose gap holds the opening credits
+        while j < len(times) and times[j] is None and sentences[j]["id"] in in_audio:
             j += 1
+        if j == k:
+            k += 1
+            continue
         prev, nxt = (times[k - 1] if k else None), (times[j] if j < len(times) else None)
         # (only if there is audio between the neighbours to give them)
         if prev and nxt and prev["track"] == nxt["track"] and 0.05 * (j - k) <= nxt["start"] - prev["end"] < 60:

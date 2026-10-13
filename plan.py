@@ -340,10 +340,11 @@ for track, ks in by_track.items():
                 first, g_start = ks[i + 1], end
 
 # --- speech in a chunk that belongs to no text: a picture read aloud (a newspaper advert, a title set as an image),
-# an announcement. A speech segment counts if every character Deepgram heard in it is one the alignment found no
-# book text for (an insertion, not a misheard word) and no sentence is located over it. align.py removes it from the
-# aligner's audio together with the pauses: the aligner should only hear speech that belongs to its text.
-aligned_h = {h for h in r2h if h >= 0}
+# an announcement such as the opening credits. A speech segment counts if no character Deepgram heard in it aligns to
+# the text of a located sentence (an insertion, or matched only to text that is not in the audio, like a contents page
+# the credits' sounds got spread over) and no sentence is located over it. align.py removes it from the aligner's
+# audio together with the pauses: the aligner should only hear speech that belongs to its text.
+aligned_h = {h for r, h in enumerate(r2h) if h >= 0 and rough[R_sent[r]]}
 heard_at_t = {}
 for h, (tr, a0, b0) in enumerate(H_pos):
     heard_at_t.setdefault(tr, []).append(((a0 + b0) / 2, h))
