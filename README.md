@@ -76,7 +76,8 @@ On Colab/Kaggle the notebook installs what `align.py` needs into the platform's 
   deletion). A sentence is heard if its dominant run (heard characters lying together in the transcript, as in
   Storyteller's aligner) covers at least half of its reading; short lines Deepgram missed between heard neighbours
   are kept if the time there could hold them at twice the narrator's measured pace. Tracks are cut into ≤160 s
-  chunks, only before heard sentences, in the first silence after the previous sentence's last heard word.
+  chunks, only before heard sentences, in the first silence after the previous sentence's last heard word, and
+  never where speech nobody transcribed lies between the two sentences' heard sounds (it could belong to either).
   The pauses are defined once, here, for the whole pipeline: VAD's pauses minus any stretch where Deepgram heard a
   word starting inside them (VAD misses short and soft speech: a lone 「へ？」, a whispered line). `plan.json`
   carries the resulting speech map; chunks are cut, pauses shortened (`align.py`) and sentence boundaries placed

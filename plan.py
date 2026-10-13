@@ -270,6 +270,15 @@ def between(track):
 SPEECH = {t["id"]: between(t["id"]) for t in tracks}
 
 
+def accounted(track, after, before):
+    """Every speech segment lying wholly between two heard sounds holds a word Deepgram heard starting in it."""
+    starts = [w[0] for w in WORDS[track]]
+    for a, b in SPEECH[track]:
+        if a > after and b <= before and bisect.bisect_left(starts, a) == bisect.bisect_right(starts, b):
+            return False
+    return True
+
+
 def cut_before(track, t, prev_heard=None):
     """A cut point inside the pause just before speech that starts near t.
     Given when the previous sentence's last matched character starts: the first silence after it, if that comes
@@ -312,6 +321,10 @@ for track, ks in by_track.items():
     ks = [k for i, k in enumerate(ks) if i == 0 or (not rough[k].get("unheard") and rough[k - 1]
                                                     and not rough[k - 1].get("unheard")
                                                     and rough[k - 1]["track"] == track)]
+    # and only where all speech between the one before's last heard sound and this one's first is something Deepgram
+    # heard: speech nobody transcribed there (a lone 「ん？」 the alignment matched to the ん of 「…くん」 before it)
+    # could belong to either sentence, and a cut must never part a sentence from its own audio
+    ks = [k for i, k in enumerate(ks) if i == 0 or accounted(track, rough[k - 1]["last_heard"], rough[k]["first_heard"])]
     first, g_start = ks[0], cut_before(track, rough[ks[0]]["start"])
     for i, k in enumerate(ks):
         next_start = rough[ks[i + 1]]["start"] if i + 1 < len(ks) else None
