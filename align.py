@@ -156,7 +156,7 @@ elif gpus > 1 and len(todo) > 1:
 if todo:
     from qwen_asr import Qwen3ForcedAligner
     if not cuda:
-        torch.set_num_threads(os.cpu_count())
+        torch.set_num_threads(max(1, os.cpu_count() - 2))  # two cores left for the rest of the computer
     model = Qwen3ForcedAligner.from_pretrained("Qwen/Qwen3-ForcedAligner-0.6B", dtype=getattr(torch, args.dtype),
                                                device_map="cuda:0" if cuda else "cpu")
     print(f"aligning {len(todo)} chunks on {'GPU ' + torch.cuda.get_device_name(0) if cuda else 'CPU'}, "
